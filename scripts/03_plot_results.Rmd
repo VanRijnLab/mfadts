@@ -68,10 +68,16 @@ predict_recall <- function (seq_list, h = model_params$h, decay = model_params$d
     
     seq_d <- ifelse(is.data.table(decay), decay[id == x$id, d], decay)
     seq_h <- ifelse(is.data.table(h), h[id == x$id, h], h)
-    tau_window <- ifelse(is.data.table(tau), tau[n_windows == windows & window == x$window, tau], tau)
+    
+    if(is.data.table(tau)) {
+      if("id" %in% names(tau)) seq_tau <- tau[id == x$id, tau]
+      if("n_windows" %in% names(tau)) seq_tau <- tau[n_windows == windows & window == x$window, tau]
+    } else {
+      seq_tau <- tau
+    }
     
     ac <- activation(x$time_within, x$time_between, seq_h, seq_d)
-    p_recall(ac, tau_window, s)
+    p_recall(ac, seq_tau, s)
     
   })
   
@@ -89,9 +95,12 @@ window_range <- map_dfr(n_windows, function (n_w) {
 
   d_windows <- copy(d_last)
   
-  # Split the data into quantiles
-  d_windows[, window := dplyr::ntile(time_between, n_w)]
-
+  if (n_w == 1) {
+    d_windows[, window := 1]
+  } else {
+    d_windows[, window := cut(log(time_between), breaks = n_w, labels = FALSE)]
+  }
+  
   # Get the window range(s)
   window_range <- d_windows[, .(start = min(time_between), end = max(time_between)), by = .(window)]
   window_range[, geom_mean := sqrt(start*end), by = .(window)]
@@ -135,17 +144,15 @@ plot_comparison <- function (d_model,
   
   p <- ggplot() +
     # Window background
-    geom_rect(data = window_range[n_windows == n_w], aes(xmin = start/60, xmax = end/60, ymin = -Inf, ymax = Inf, alpha = as.factor(window)), fill = window_col) +
+    geom_rect(data = window_range[n_windows == n_w],
+              aes(xmin = start/60, xmax = ifelse(is.na(shift(start, -1)), end, shift(start, -1))/60,
+                  ymin = -Inf, ymax = Inf, alpha = as.factor(window)),
+              fill = window_col) +
     # Jittered observations along edges
     geom_point(data = d_last, 
                aes(x = time_between/60, y = plot_dodge(correct, .05)),
                position = position_jitter(width = 0, height = .025, seed = 123),
                colour = "grey20", size = .001, pch = ".", alpha = .1) +
-    # Time markers along the top
-    geom_segment(aes(x = label_x, xend = label_x, y = 1.05, yend = 1.065),
-                 colour = "grey20") +
-    geom_text(aes(x = label_x, y = label_y, label = label_txt),
-              colour = "grey30") +
     # GAM: data
     geom_smooth(data = d_last,
                 aes(x = time_between/60, y = correct),
@@ -165,7 +172,8 @@ plot_comparison <- function (d_model,
     scale_x_log10(
       breaks = scales::trans_breaks("log10", function(x) 10^x),
       labels = scales::trans_format("log10", scales::math_format(10^.x)),
-      expand = c(0, 0)
+      expand = c(0, 0),
+      sec.axis = sec_axis(~.x, breaks = label_x, labels = label_txt)
     ) +
     scale_y_continuous(breaks = seq(0, 1, by = .25), labels = scales::percent_format()) +
     scale_alpha_manual(values = rep(c(.1, .25), ceiling(n_w/2))) +
@@ -176,7 +184,7 @@ plot_comparison <- function (d_model,
     annotation_logticks(sides = "b", outside = T) +
     coord_cartesian(ylim = c(0, 1), xlim = c(window_range[1, start], window_range[.N, end])/60, clip = "off") +
     theme_bw(base_size = 14) +
-    theme(plot.margin = margin(21, 14, 7, 7),
+    theme(plot.margin = margin(7, 14, 7, 7),
           panel.grid.major.x = element_blank(),
           panel.grid.minor = element_blank(),
           panel.border = element_blank())
@@ -190,24 +198,34 @@ plot_comparison <- function (d_model,
 General function for plotting parameter change over time:
 ```{r}
 plot_parameter <- function(d_parameter,
+                           parameter_name = "",
                            n_w = 1,
                            log_x = TRUE,
                            log_y = FALSE,
                            print_plot = TRUE) {
   
   # Calculate R-squared
-  x <- d_parameter[n_windows == n_w, geom_mean]
+  x <- d_parameter[n_windows == n_w, geom_mean]/60
   y <- d_parameter[n_windows == n_w, parameter]
   if (log_x) x <- log(x)
   if (log_y) y <- log(y)
   
   m <- lm(y ~ x)
+
+  eq <- substitute(parameter_name == a-b %*% ln(italic(t)), 
+                   list(parameter_name = parameter_name,
+                        a = format(unname(coef(m)[1]), digits = 3),
+                        b = format(abs(unname(coef(m)[2])), digits = 3)))
+  
+  eq <- as.character(as.expression(eq))
+  
   rsq <- paste("R^2 ==", scales::number(summary(m)$r.squared, accuracy = .01))
 
   p <- ggplot() +
     # Window background
-    geom_rect(data = window_range[n_windows == n_w], 
-              aes(xmin = start/60, xmax = end/60, ymin = ifelse(log_y, 0, -Inf), ymax = Inf, alpha = as.factor(window)), 
+    geom_rect(data = window_range[n_windows == n_w],
+              aes(xmin = start/60, xmax = ifelse(is.na(shift(start, -1)), end, shift(start, -1))/60,
+                  ymin = ifelse(log_y, 0, -Inf), ymax = Inf, alpha = as.factor(window)),
               fill = window_col) +
     # Regression line
     geom_smooth(data = d_parameter[n_windows == n_w], 
@@ -217,18 +235,30 @@ plot_parameter <- function(d_parameter,
     # Parameter values
     geom_point(data = d_parameter[n_windows == n_w],
                aes(y = parameter, x = geom_mean/60)) +
-    scale_alpha_manual(values = rep(c(.25, .1), ceiling(n_w/2))) +
+    scale_alpha_manual(values = rep(c(.1, .25), ceiling(n_w/2))) +
     # R-squared
-    geom_text(aes(x = Inf, y = Inf, label = rsq),
+    geom_label(aes(x = Inf, y = Inf, label = rsq),
+              label.padding = unit(.5, "lines"),
+              label.size = NA,
+              fill = NA,
+              hjust = "inward", vjust = "inward",
+              parse = TRUE) +
+    geom_label(aes(x = ifelse(log_x, 0, -Inf), y = ifelse(log_y, 0, -Inf), label = eq),
+              label.padding = unit(.5, "lines"),
+              label.size = NA,
+              fill = NA,
               hjust = "inward", vjust = "inward",
               parse = TRUE) +
     # Plot setup
     guides(alpha = "none") +
     labs(x = "Between-session interval (minutes)",
          y = "Fitted parameter") +
-    coord_cartesian(xlim = c(window_range[1, start], window_range[.N, end])/60, clip = "off") +
+    scale_x_continuous(sec.axis = sec_axis(~.x, breaks = label_x, labels = label_txt)) +
+    coord_cartesian(xlim = c(window_range[1, start], window_range[.N, end])/60,
+                    ylim = c(min(y) - .1*diff(range(y)), max(y) + .1*diff(range(y))),
+                    clip = "off") +
     theme_bw(base_size = 14) +
-    theme(plot.margin = margin(21, 14, 7, 7),
+    theme(plot.margin = margin(7, 14, 7, 7),
           panel.grid.major.x = element_blank(),
           panel.grid.minor = element_blank(),
           panel.border = element_blank())
@@ -240,7 +270,8 @@ plot_parameter <- function(d_parameter,
       scale_x_log10(
         breaks = scales::trans_breaks("log10", function(x) 10^x),
         labels = scales::trans_format("log10", scales::math_format(10^.x)),
-        expand = c(0, 0)
+        expand = c(0, 0),
+        sec.axis = sec_axis(~.x, breaks = label_x, labels = label_txt)
       ) +
       annotation_logticks(sides = "b", outside = T)
   }
@@ -337,11 +368,11 @@ p_single_h <- plot_comparison(d_model = d_single_h,
 Rather than determining the best parameter fit from the whole data set, we also explore a scenario in which we only have intervals around 24 hours, which is more similar to many controlled experiments.
 
 We use a subset of the data with intervals around 24 hours.
-In the 20-window fit this falls quite neatly within window number 12, so we'll use that.
+In a 25-window fit this happens to fall quite neatly within window number 17, so we'll use that.
 ```{r}
-ggplot(window_range[n_windows == 20]) +
+ggplot(window_range[n_windows == 25]) +
   geom_vline(aes(xintercept = 24*60*60), colour = "red", lty = 2) +
-  geom_hline(aes(yintercept = 12), colour = "red", lty = 2) +
+  geom_hline(aes(yintercept = 17), colour = "red", lty = 2) +
   geom_segment(aes(x = start, xend = end, y = window, yend = window)) +
   geom_point(aes(x = geom_mean, y = window)) +
   geom_text(aes(x = geom_mean, y = window + .5, label = window), colour = "blue") +
@@ -359,7 +390,7 @@ ggplot(window_range[n_windows == 20]) +
 ### Threshold
 
 ```{r}
-tau_24h <- lr_tau[n_windows == 20 & window == 12, tau]
+tau_24h <- lr_tau[n_windows == 25 & window == 17, tau]
 ```
 
 The optimal threshold for the 24h interval is `r tau_24h`, quite similar to the optimal threshold for the whole data set.
@@ -372,7 +403,7 @@ p_tau_24h <- plot_comparison(d_model = d_tau_24h,
                              n_w = 1, 
                              label_pos = list(data = list(x = 35000, y = .5), 
                                               model = list(x = 5000, y = .29))) +
-  geom_rect(data = window_range[n_windows == 20 & window == 12], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
+  geom_rect(data = window_range[n_windows == 25 & window == 17], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
 p_tau_24h
 ```
@@ -382,13 +413,13 @@ p_tau_24h
 Because optimal decay is derived separately for each individual learning sequence, there is not a single decay value associated with the 24h interval, and we only know the best decay for the individual sequences that fall within the 24h set.
 
 ```{r}
-d_24h <- median(bs_d_indiv[n_windows == 20 & window == 12, d])
+d_24h <- median(bs_d_indiv[n_windows == 25 & window == 17, d])
 ```
 
 To get a parameter that we can use for general prediction, we'll take the median: d = `r d_24h`.
 
 ```{r}
-ggplot(bs_d_indiv[n_windows == 20 & window == 12], aes(x = d)) +
+ggplot(bs_d_indiv[n_windows == 25 & window == 17], aes(x = d)) +
   geom_histogram(binwidth = .005, fill = "midnightblue") +
   geom_vline(aes(xintercept = d_24h), colour = "red", lty = 2)
 ```
@@ -397,14 +428,14 @@ These predictions show the typical pattern: the model initially overpredicts rec
 ```{r}
 pred_d_24h <- predict_recall(d_seq_list_single,
                              decay = d_24h, 
-                             tau = lr_activation[n_windows == 20 & window == 12, tau])
+                             tau = lr_activation[n_windows == 25 & window == 17, tau])
 d_d_24h <- d_last[pred_d_24h, on = .(id)]
 
 p_d_24h <- plot_comparison(d_model = d_d_24h, 
                            n_w = 1, 
                            label_pos = list(data = list(x = 35000, y = .5), 
                                             model = list(x = 5000, y = .78))) +
-  geom_rect(data = window_range[n_windows == 20 & window == 12], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
+  geom_rect(data = window_range[n_windows == 25 & window == 17], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
 p_d_24h
 ```
@@ -413,13 +444,13 @@ p_d_24h
 ### Scaling factor
 
 ```{r}
-h_24h <- median(bs_h_indiv[n_windows == 20 & window == 12, h])
+h_24h <- median(bs_h_indiv[n_windows == 25 & window == 17, h])
 ```
 
 As with decay, we'll take the median scaling factor from the 24h set: h = `r h_24h`.
 
 ```{r}
-ggplot(bs_h_indiv[n_windows == 20 & window == 12], aes(x = h)) +
+ggplot(bs_h_indiv[n_windows == 25 & window == 17], aes(x = h)) +
   geom_histogram(binwidth = .01, fill = "midnightblue") +
   geom_vline(aes(xintercept = h_24h), colour = "red", lty = 2)
 ```
@@ -428,14 +459,14 @@ This model already does surprisingly well: short-term predictions are good, thou
 ```{r}
 pred_h_24h <- predict_recall(d_seq_list_single,
                              h = h_24h,
-                             tau = lr_activation[n_windows == 20 & window == 12, tau])
+                             tau = lr_activation[n_windows == 25 & window == 17, tau])
 d_h_24h <- d_last[pred_h_24h, on = .(id)]
 
 p_h_24h <- plot_comparison(d_model = d_h_24h, 
                            n_w = 1, 
                            label_pos = list(data = list(x = 35000, y = .5), 
                                             model = list(x = 12000, y = .2))) +
-  geom_rect(data = window_range[n_windows == 20 & window == 12], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
+  geom_rect(data = window_range[n_windows == 25 & window == 17], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
 p_h_24h
 ```
@@ -469,7 +500,7 @@ Here we'll look at the results when the data are split into 20 bins, each contai
 Prepare the data:
 ```{r}
 d_20 <- copy(d_last)
-d_20 <- d_20[, sequence := 1:.N][, .(id, sequence, time_between, window = ntile(time_between, 20))]
+d_20 <- d_20[, sequence := 1:.N][, .(id, sequence, time_between, window = cut(log(time_between), breaks = 20, labels = FALSE))]
 d_20_seq <- generate_seq_list(d_20[d_f, on = .(id)])
 ```
 
@@ -483,7 +514,7 @@ d_tau_20 <- d_last[pred_tau_20, on = .(id)]
 p_tau_20 <- plot_comparison(d_model = d_tau_20, 
                             n_w = 20, 
                             label_pos = list(data = list(x = 35000, y = .5), 
-                                             model = list(x = 20000, y = .29)))
+                                             model = list(x = 20000, y = .35)))
 ```
 
 Parameter change over time:
@@ -492,8 +523,31 @@ lr_tau_viz <- lr_tau[window_range, on = .(n_windows, window)]
 setnames(lr_tau_viz, "tau", "parameter")
 
 p_tau_time <- plot_parameter(d_parameter = lr_tau_viz,
+                             parameter_name = quote(tau),
                              n_w = 20)
 ```
+
+LM-based fit:
+```{r}
+m_tau <- lm(parameter ~ log(geom_mean), data = lr_tau_viz[n_windows == 20])
+
+d_tau_lm <- map_dfr(d_20_seq, function(x) {
+  list(id = x$id, geom_mean = x$time_between)
+})
+
+d_tau_lm$tau <- predict(m_tau, newdata = d_tau_lm)
+setDT(d_tau_lm)
+
+pred_tau_lm <- predict_recall(seq_list = d_20_seq, tau = d_tau_lm)
+d_tau_lm <- d_last[pred_tau_lm, on = .(id)]
+
+p_tau_lm <- plot_comparison(d_model = d_tau_lm, 
+                            n_w = 20, 
+                            label_pos = list(data = list(x = 35000, y = .5), 
+                                             model = list(x = 20000, y = .29)))
+
+```
+
 
 
 ## Decay
@@ -508,8 +562,8 @@ d_d_20 <- d_last[pred_d_20, on = .(id)]
 
 p_d_20 <- plot_comparison(d_model = d_d_20, 
                           n_w = 20, 
-                          label_pos = list(data = list(x = 30000, y = .3), 
-                                           model = list(x = 40000, y = .54)))
+                          label_pos = list(data = list(x = 35000, y = .5), 
+                                           model = list(x = 20000, y = .35)))
 ```
 
 Parameter change over time:
@@ -518,8 +572,31 @@ bs_d_viz <- bs_d_indiv[window_range, on = .(n_windows, window)][, .(d = median(d
 setnames(bs_d_viz, "d", "parameter")
 
 p_d_time <- plot_parameter(d_parameter = bs_d_viz,
+                           parameter_name = quote(italic(d)),
                            n_w = 20)
 ```
+
+LM-based fit:
+```{r}
+m_d <- lm(parameter ~ log(geom_mean), data = bs_d_viz[n_windows == 20])
+
+d_d_lm <- map_dfr(d_20_seq, function(x) {
+  list(id = x$id, geom_mean = x$time_between)
+})
+
+d_d_lm$d <- predict(m_d, newdata = d_d_lm)
+setDT(d_d_lm)
+
+pred_d_lm <- predict_recall(seq_list = d_20_seq, decay = d_d_lm, tau = lr_activation, windows = 20)
+d_d_lm <- d_last[pred_d_lm, on = .(id)]
+
+p_d_lm <- plot_comparison(d_model = d_d_lm,
+                          n_w = 20, 
+                          label_pos = list(data = list(x = 35000, y = .5), 
+                                           model = list(x = 30000, y = .64)))
+```
+
+
 ## Scaling factor
 
 ```{r}
@@ -532,8 +609,8 @@ d_h_20 <- d_last[pred_h_20, on = .(id)]
 
 p_h_20 <- plot_comparison(d_model = d_h_20, 
                           n_w = 20, 
-                          label_pos = list(data = list(x = 30000, y = .3), 
-                                           model = list(x = 40000, y = .54)))
+                          label_pos = list(data = list(x = 35000, y = .5), 
+                                           model = list(x = 20000, y = .35)))
 ```
 
 Parameter change over time:
@@ -542,8 +619,14 @@ bs_h_viz <- bs_h_indiv[window_range, on = .(n_windows, window)][, .(h = median(h
 setnames(bs_h_viz, "h", "parameter")
 
 p_h_time <- plot_parameter(d_parameter = bs_h_viz,
+                           parameter_name = quote(ln(italic(h))),
                            log_y = TRUE,
-                           n_w = 20)
+                           n_w = 20) +
+  coord_cartesian(xlim = c(window_range[1, start], window_range[.N, end])/60, ylim = c(.001, 1.2), clip = "off") +
+  theme(axis.text.y = element_text(margin = margin(r = 8)))
+
+
+p_h_time
 ```
 
 # Interval distribution
@@ -553,16 +636,14 @@ A histogram of the between-session intervals in the data.
 p_histogram <- ggplot() +
   # Window background
   geom_rect(data = window_range[n_windows == 1], aes(xmin = start/60, xmax = end/60, ymin = -Inf, ymax = Inf), fill = window_col, alpha = .1) +
-  # Time markers along the top
-  geom_segment(aes(x = label_x, xend = label_x, y = 1.05, yend = 1.065), colour = "grey20") +
-  geom_text(aes(x = label_x, y = label_y, label = label_txt), colour = "grey30") +
   # Histogram
   geom_histogram(data = d_last, aes(x = time_between/60, y = ..ncount..), bins = 100, fill = obs_col) +
   # Plot setup
   scale_x_log10(
     breaks = scales::trans_breaks("log10", function(x) 10^x),
     labels = scales::trans_format("log10", scales::math_format(10^.x)),
-    expand = c(0, 0)
+    expand = c(0, 0),
+    sec.axis = sec_axis(~.x, breaks = label_x, labels = label_txt)
   ) +
   scale_y_continuous(breaks = seq(0, 1, by = .25)) +
   labs(x = "Between-session interval (minutes)",
@@ -570,7 +651,7 @@ p_histogram <- ggplot() +
   annotation_logticks(sides = "b", outside = T) +
   coord_cartesian(ylim = c(0, 1), xlim = c(window_range[1, start], window_range[.N, end])/60, clip = "off") +
   theme_bw(base_size = 14) +
-  theme(plot.margin = margin(21, 14, 7, 7),
+  theme(plot.margin = margin(7, 14, 7, 7),
         panel.grid.major.x = element_blank(),
         panel.grid.minor = element_blank(),
         panel.border = element_blank())
@@ -613,7 +694,8 @@ plot_grid(
   labels = c("A\t\tInterval-dependent threshold", "B\t\tInterval-dependent decay", "C\t\tInterval-dependent h"),
   align = "hv",
   label_x = .025,
-  hjust = 0
+  hjust = 0,
+  scale = .9
 ) +
   theme(plot.background = element_rect(fill = "white", colour = NA))
 

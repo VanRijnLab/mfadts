@@ -71,9 +71,12 @@ window_range <- map_dfr(n_windows, function (n_w) {
 
   d_windows <- copy(d_last)
   
-  # Split the data into quantiles
-  d_windows[, window := dplyr::ntile(time_between, n_w)]
-
+  if (n_w == 1) {
+    d_windows[, window := 1]
+  } else {
+    d_windows[, window := cut(log(time_between), breaks = n_w, labels = FALSE)]
+  }
+  
   # Get the window range(s)
   window_range <- d_windows[, .(start = min(time_between), end = max(time_between)), by = .(window)]
   window_range[, geom_mean := sqrt(start*end), by = .(window)]
@@ -83,7 +86,9 @@ window_range <- map_dfr(n_windows, function (n_w) {
 
   return (window_range)
 })
+
 ```
+
 
 # Fit model
 
@@ -99,8 +104,13 @@ if (!use_cache | !file.exists(logreg_tau_file)) {
     
     d_windows <- copy(d_last)
     
-    # Split the data into quantiles
-    d_windows[, window := dplyr::ntile(time_between, n_w)]
+    # Split the data into windows
+    if (n_w == 1) {
+      d_windows[, window := 1]
+    } else {
+      d_windows[, window := cut(log(time_between), breaks = n_w, labels = FALSE)]
+    }
+    
     d_windows_split <- split(d_windows, d_windows$window)
     
     # Within each quantile, perform logistic regression
@@ -180,8 +190,13 @@ if (!use_cache | !file.exists(logreg_activation_file)) {
     
     d_windows <- copy(d_last)
     
-    # Split the data into quantiles
-    d_windows[, window := dplyr::ntile(time_between, n_w)]
+    # Split the data into windows
+    if (n_w == 1) {
+      d_windows[, window := 1]
+    } else {
+      d_windows[, window := cut(log(time_between), breaks = n_w, labels = FALSE)]
+    }
+
     d_windows_split <- split(d_windows, d_windows$window)
     
     # Find the appropriate tau value
@@ -244,8 +259,13 @@ if (!use_cache | !file.exists(bs_d_indiv_file)) {
     
     d_windows <- copy(d_last)
     
-    # Split the data into quantiles
-    d_windows[, window := dplyr::ntile(time_between, n_w)]
+    # Split the data into windows
+    if (n_w == 1) {
+      d_windows[, window := 1]
+    } else {
+      d_windows[, window := cut(log(time_between), breaks = n_w, labels = FALSE)]
+    }
+
     d_windows_split <- split(d_windows, d_windows$window)
     
     # Within each quantile, use binary search to find d from A
@@ -312,8 +332,13 @@ if (!use_cache | !file.exists(bs_h_indiv_file)) {
     
     d_windows <- copy(d_last)
     
-    # Split the data into quantiles
-    d_windows[, window := dplyr::ntile(time_between, n_w)]
+    # Split the data into windows
+    if (n_w == 1) {
+      d_windows[, window := 1]
+    } else {
+      d_windows[, window := cut(log(time_between), breaks = n_w, labels = FALSE)]
+    }
+    
     d_windows_split <- split(d_windows, d_windows$window)
     
     # Within each quantile, use binary search to find h from A
