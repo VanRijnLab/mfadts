@@ -7,3 +7,10 @@ This repository contains the code associated with the manuscript **Explaining fo
 
 - [Fitting the models to the data](./output/02_fit_models.md)
 - [Visualisations of model fits and parameters](./output/03_plot_results.md)
+
+
+## Rerunning the code
+
+In a terminal:
+
+    make clean && make all
