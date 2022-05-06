@@ -1,25 +1,28 @@
 Fit memory models
 ================
 Maarten van der Velde
-Last updated: 2022-04-19
+Last updated: 2022-05-06
+
+-   [Overview](#overview)
+-   [Setup](#setup)
+    -   [Model fitting setup](#model-fitting-setup)
+    -   [Data setup](#data-setup)
+-   [Fit model](#fit-model)
+    -   [Optimal retrieval threshold](#optimal-retrieval-threshold)
+        -   [Short intervals only](#short-intervals-only)
+    -   [Optimal activation](#optimal-activation)
+    -   [Optimal decay](#optimal-decay)
+    -   [Optimal scaling factor h](#optimal-scaling-factor-h)
+-   [Session info](#session-info)
 
 # Overview
 
-This code fits the ACT-R memory model to the retrieval practice data. We
-vary which parameter is tuned and which are kept constant, as well as
-the number of windows in which the data are split before we fit the
-model.
+This code fits the ACT-R memory model to the retrieval practice data. We vary which parameter is tuned and which are kept constant, as well as the number of windows in which the data are split before we fit the model.
 
 The model as we use it here consists of two functions:
 
-  - **Activation**:
-    \(A = \ln \left( \sum_j (t_{wj} + h * t_{b})^{-d} \right)\)<br>Parameters:
-    scaling factor \(h\) and decay \(d\). Here, \(t_{wj}\) refers to
-    within-session intervals and \(t_b\) to between-session intervals.
-  - **Recall probability**:
-    \(p = \frac{1}{1 + e^{-(A - \tau)/s}}\)<br>Parameters: retrieval
-    threshold \(\tau\) (and activation noise \(s\), which we don’t vary
-    here).
+-   **Activation**: *A* = ln (∑<sub>*j*</sub>(*t*<sub>*w**j*</sub>+*h*\**t*<sub>*b*</sub>)<sup>−*d*</sup>)<br>Parameters: scaling factor *h* and decay *d*. Here, *t*<sub>*w**j*</sub> refers to within-session intervals and *t*<sub>*b*</sub> to between-session intervals.
+-   **Recall probability**: $p = \\frac{1}{1 + e^{-(A - \\tau)/s}}$<br>Parameters: retrieval threshold *τ* (and activation noise *s*, which we don't vary here).
 
 # Setup
 
@@ -37,15 +40,13 @@ set.seed(0)
 
 ## Model fitting setup
 
-To save time, try to load model fitting results from cache. Set to FALSE
-to refit the models.
+To save time, try to load model fitting results from cache. Set to FALSE to refit the models.
 
 ``` r
 use_cache <- TRUE
 ```
 
-Set default parameters for the ACT-R memory model. These values are used
-whenever a parameter is held constant.
+Set default parameters for the ACT-R memory model. These values are used whenever a parameter is held constant.
 
 ``` r
 model_params <- list(
@@ -55,9 +56,7 @@ model_params <- list(
 )
 ```
 
-We want to try different splits of the data, ranging from a single
-window that includes everything to 100
-    windows.
+We want to try different splits of the data, ranging from a single window that includes everything to 100 windows.
 
 ``` r
 n_windows <- c(1:10, 20, 25, 50, 100)
@@ -87,21 +86,16 @@ str(d_f)
     ##  $ time_within             : num  354 348 284 240 327 ...
     ##  - attr(*, ".internal.selfref")=<externalptr>
 
-Each user-fact pair has a single learning sequence associated with it,
-consisting of three or more trials in one session and the first trial in
-the next session.
+Each user-fact pair has a single learning sequence associated with it, consisting of three or more trials in one session and the first trial in the next session.
 
-Isolate the last observation per learning sequence (i.e., the one after
-the between-session interval). This is the observation that the model
-has to predict, given all prior observations in the sequence.
+Isolate the last observation per learning sequence (i.e., the one after the between-session interval). This is the observation that the model has to predict, given all prior observations in the sequence.
 
 ``` r
 d_last <- d_f[, .SD[.N], by = id]
 setorder(d_last, time_between)
 ```
 
-Define the time windows for all splits of the data (time values are in
-seconds).
+Define the time windows for all splits of the data (time values are in seconds).
 
 ``` r
 window_range <- map_dfr(n_windows, function (n_w) {
@@ -144,9 +138,7 @@ window_range
 
 ## Optimal retrieval threshold
 
-For each window split, find the optimal retrieval threshold using
-logistic regression, keeping other parameters
-constant.
+For each window split, find the optimal retrieval threshold using logistic regression, keeping other parameters constant.
 
 ``` r
 logreg_tau_file <- file.path("..", "data", "logistic_regression_tau.csv")
@@ -199,9 +191,7 @@ lr_tau <- fread(logreg_tau_file)
 
 ### Short intervals only
 
-For comparison, find the best threshold for reasonably short intervals:
-0-10 minutes (Figure 1B in the
-paper).
+For comparison, find the best threshold for reasonably short intervals: 0-10 minutes (Figure 1B in the paper).
 
 ``` r
 logreg_tau_short_file <- file.path("..", "data", "logistic_regression_tau_short.csv")
@@ -236,9 +226,7 @@ tau_short <- fread(logreg_tau_short_file)
 
 ## Optimal activation
 
-Find the optimal activation per window using logistic regression,
-keeping other parameters
-constant.
+Find the optimal activation per window using logistic regression, keeping other parameters constant.
 
 ``` r
 logreg_activation_file <- file.path("..", "data", "logistic_regression_activation.csv")
@@ -307,8 +295,7 @@ lr_ac <- fread(logreg_activation_file)
 
 ## Optimal decay
 
-Using the optimal activation values determined in the previous step, do
-a binary search to find the associated decay for each learning sequence.
+Using the optimal activation values determined in the previous step, do a binary search to find the associated decay for each learning sequence.
 
 ``` r
 bs_d_indiv_file <- file.path("..", "data", "binary_search_indiv_d.csv")
@@ -381,8 +368,7 @@ bs_d_indiv <- fread(bs_d_indiv_file)
 
 ## Optimal scaling factor h
 
-In the same way, do a binary search to find the scaling factor for each
-learning sequence, based on the optimal activation.
+In the same way, do a binary search to find the scaling factor for each learning sequence, based on the optimal activation.
 
 ``` r
 bs_h_indiv_file <- file.path("..", "data", "binary_search_indiv_h.csv")
@@ -469,11 +455,11 @@ sessionInfo()
     ## 
     ## locale:
     ##  [1] LC_CTYPE=en_US.UTF-8       LC_NUMERIC=C              
-    ##  [3] LC_TIME=nl_NL.UTF-8        LC_COLLATE=en_US.UTF-8    
-    ##  [5] LC_MONETARY=nl_NL.UTF-8    LC_MESSAGES=en_US.UTF-8   
-    ##  [7] LC_PAPER=nl_NL.UTF-8       LC_NAME=C                 
+    ##  [3] LC_TIME=en_GB.UTF-8        LC_COLLATE=en_US.UTF-8    
+    ##  [5] LC_MONETARY=en_GB.UTF-8    LC_MESSAGES=en_US.UTF-8   
+    ##  [7] LC_PAPER=en_GB.UTF-8       LC_NAME=C                 
     ##  [9] LC_ADDRESS=C               LC_TELEPHONE=C            
-    ## [11] LC_MEASUREMENT=nl_NL.UTF-8 LC_IDENTIFICATION=C       
+    ## [11] LC_MEASUREMENT=en_GB.UTF-8 LC_IDENTIFICATION=C       
     ## 
     ## attached base packages:
     ## [1] stats     graphics  grDevices utils     datasets  methods   base     

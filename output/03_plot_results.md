@@ -1,7 +1,35 @@
 Plot modelling results
 ================
 Maarten van der Velde
-Last updated: 2022-04-19
+Last updated: 2022-05-06
+
+-   [Overview](#overview)
+-   [Setup](#setup)
+    -   [General plot elements](#general-plot-elements)
+-   [Single parameter](#single-parameter)
+    -   [Whole data set](#whole-data-set)
+        -   [Threshold](#threshold)
+        -   [Decay](#decay)
+        -   [Scaling factor](#scaling-factor)
+    -   [24-hour interval](#hour-interval)
+        -   [Threshold](#threshold-1)
+        -   [Decay](#decay-1)
+        -   [Scaling factor](#scaling-factor-1)
+    -   [Short intervals](#short-intervals)
+        -   [Threshold](#threshold-2)
+-   [Time-dependent parameters](#time-dependent-parameters)
+    -   [Threshold](#threshold-3)
+    -   [Decay](#decay-2)
+    -   [Scaling factor](#scaling-factor-2)
+-   [Interval distribution](#interval-distribution)
+-   [Combined figures](#combined-figures)
+    -   [Model fits](#model-fits)
+    -   [Parameters over time](#parameters-over-time)
+-   [Session info](#session-info)
+
+# Overview
+
+This code visualises the models fitted in `02_fit_models`.
 
 # Setup
 
@@ -11,6 +39,7 @@ library(dplyr)
 library(purrr)
 library(ggplot2)
 library(cowplot)
+library(gridExtra)
 
 source("00_helper_funs.R")
 ```
@@ -54,8 +83,7 @@ Set parameters for splitting the data into windows:
 n_windows <- c(1:10, 20, 25, 50, 100)
 ```
 
-General function for predicting recall for a given parameter
-configuration:
+General function for predicting recall for a given parameter configuration:
 
 ``` r
 predict_recall <- function (seq_list, h = model_params$h, decay = model_params$decay, tau, s = model_params$s, windows = 1) {
@@ -289,8 +317,7 @@ plot_parameter <- function(d_parameter,
 
 # Single parameter
 
-What does predicted retention look like if we use a single parameter
-configuration fitted across the whole range of intervals?
+What does predicted retention look like if we use a single parameter configuration fitted across the whole range of intervals?
 
 Divide the data into learning sequences for plotting:
 
@@ -310,13 +337,7 @@ d_seq_list_single <- generate_seq_list(d_single)
 single_tau <- lr_tau[n_windows == 1, tau]
 ```
 
-The best-fitting threshold for the entire range of intervals is
--4.6072046. If we consistently use this threshold in the model, it
-initially overpredicts retention (indicating that the threshold is too
-low relative to the activation), gets the prediction right around the
-mode of the interval distribution, and eventually underpredicts
-retention (indicating that the threshold is too
-high).
+The best-fitting threshold for the entire range of intervals is -4.6072046. If we consistently use this threshold in the model, it initially overpredicts retention (indicating that the threshold is too low relative to the activation), gets the prediction right around the mode of the interval distribution, and eventually underpredicts retention (indicating that the threshold is too high).
 
 ``` r
 pred_single_tau <- predict_recall(seq_list = d_seq_list_single, tau = single_tau)
@@ -328,16 +349,11 @@ p_single_tau <- plot_comparison(d_model = d_single_tau,
                                                  model = list(x = 7000, y = .29)))
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-15-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-15-1.png)
 
 ### Decay
 
-We did not determine the decay directly, but derived it from the
-best-fitting activation. Across the whole data set, the best-fitting
-activation is -4.1130682. We determined the optimal decay for each item,
-such that it ended up at this activation. Since activation (and the
-threshold) are constant across the range, the predicted recall is also
-simply the best-fitting horizontal line through the data.
+We did not determine the decay directly, but derived it from the best-fitting activation. Across the whole data set, the best-fitting activation is -4.1130682. We determined the optimal decay for each item, such that it ended up at this activation. Since activation (and the threshold) are constant across the range, the predicted recall is also simply the best-fitting horizontal line through the data.
 
 ``` r
 pred_single_d <- predict_recall(d_seq_list_single,
@@ -354,16 +370,11 @@ p_single_d <- plot_comparison(d_model = d_single_d,
     ## Warning in newton(lsp = lsp, X = G$X, y = G$y, Eb = G$Eb, UrS = G$UrS, L =
     ## G$L, : Fitting terminated with step failure - check results carefully
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-16-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-16-1.png)
 
 ### Scaling factor
 
-Like the decay, the optimal scaling factor was derived from the
-best-fitting activation. In principle this should again produce a
-horizontal line. However, getting this activation value would require
-scaling by a factor larger than 1 for a large portion of the data. Since
-h is limited to 1, we cannot get the activation low enough in these
-cases, and so we overpredict retention.
+Like the decay, the optimal scaling factor was derived from the best-fitting activation. In principle this should again produce a horizontal line. However, getting this activation value would require scaling by a factor larger than 1 for a large portion of the data. Since h is limited to 1, we cannot get the activation low enough in these cases, and so we overpredict retention.
 
 ``` r
 pred_single_h <- predict_recall(d_seq_list_single,
@@ -377,17 +388,13 @@ p_single_h <- plot_comparison(d_model = d_single_h,
                                                model = list(x = 35000, y = .78)))
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-17-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-17-1.png)
 
 ## 24-hour interval
 
-Rather than determining the best parameter fit from the whole data set,
-we also explore a scenario in which we only have intervals around 24
-hours, which is more similar to many controlled experiments.
+Rather than determining the best parameter fit from the whole data set, we also explore a scenario in which we only have intervals around 24 hours, which is more similar to many controlled experiments.
 
-We use a subset of the data with intervals around 24 hours. In a
-25-window fit this happens to fall quite neatly within window number 17,
-so we’ll use that.
+We use a subset of the data with intervals around 24 hours. In a 25-window fit this happens to fall quite neatly within window number 17, so we'll use that.
 
 ``` r
 ggplot(window_range[n_windows == 25]) +
@@ -407,7 +414,7 @@ ggplot(window_range[n_windows == 25]) +
   coord_cartesian(clip = "off")
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-18-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-18-1.png)
 
 ### Threshold
 
@@ -415,10 +422,7 @@ ggplot(window_range[n_windows == 25]) +
 tau_24h <- lr_tau[n_windows == 25 & window == 17, tau]
 ```
 
-The optimal threshold for the 24h interval is -4.702159, quite similar
-to the optimal threshold for the whole data set. The model’s predictions
-also look very
-similar.
+The optimal threshold for the 24h interval is -4.702159, quite similar to the optimal threshold for the whole data set. The model's predictions also look very similar.
 
 ``` r
 pred_tau_24h <- predict_recall(seq_list = d_seq_list_single, tau = tau_24h)
@@ -431,27 +435,23 @@ p_tau_24h <- plot_comparison(d_model = d_tau_24h,
   geom_rect(data = window_range[n_windows == 25 & window == 17], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-20-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-20-1.png)
 
 ``` r
 p_tau_24h
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-20-2.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-20-2.png)
 
 ### Decay
 
-Because optimal decay is derived separately for each individual learning
-sequence, there is not a single decay value associated with the 24h
-interval, and we only know the best decay for the individual sequences
-that fall within the 24h set.
+Because optimal decay is derived separately for each individual learning sequence, there is not a single decay value associated with the 24h interval, and we only know the best decay for the individual sequences that fall within the 24h set.
 
 ``` r
 d_24h <- median(bs_d_indiv[n_windows == 25 & window == 17, d])
 ```
 
-To get a parameter that we can use for general prediction, we’ll take
-the median: d = 0.2847328.
+To get a parameter that we can use for general prediction, we'll take the median: d = 0.2847328.
 
 ``` r
 ggplot(bs_d_indiv[n_windows == 25 & window == 17], aes(x = d)) +
@@ -459,11 +459,9 @@ ggplot(bs_d_indiv[n_windows == 25 & window == 17], aes(x = d)) +
   geom_vline(aes(xintercept = d_24h), colour = "red", lty = 2)
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-22-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-22-1.png)
 
-These predictions show the typical pattern: the model initially
-overpredicts recall, gets it right around 24h, and eventually
-underpredicts recall.
+These predictions show the typical pattern: the model initially overpredicts recall, gets it right around 24h, and eventually underpredicts recall.
 
 ``` r
 pred_d_24h <- predict_recall(d_seq_list_single,
@@ -474,17 +472,14 @@ d_d_24h <- d_last[pred_d_24h, on = .(id)]
 p_d_24h <- plot_comparison(d_model = d_d_24h, 
                            n_w = 1, 
                            label_pos = list(data = list(x = 35000, y = .5), 
-                                            model = list(x = 5000, y = .78))) +
+                                            model = list(x = 5000, y = .78)),
+                           print_plot = FALSE) +
   geom_rect(data = window_range[n_windows == 25 & window == 17], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
-```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-23-1.png)<!-- -->
-
-``` r
 p_d_24h
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-23-2.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-23-1.png)
 
 ### Scaling factor
 
@@ -492,8 +487,7 @@ p_d_24h
 h_24h <- median(bs_h_indiv[n_windows == 25 & window == 17, h])
 ```
 
-As with decay, we’ll take the median scaling factor from the 24h set: h
-= 0.0029473.
+As with decay, we'll take the median scaling factor from the 24h set: h = 0.0029473.
 
 ``` r
 ggplot(bs_h_indiv[n_windows == 25 & window == 17], aes(x = h)) +
@@ -501,11 +495,9 @@ ggplot(bs_h_indiv[n_windows == 25 & window == 17], aes(x = h)) +
   geom_vline(aes(xintercept = h_24h), colour = "red", lty = 2)
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-25-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-25-1.png)
 
-This model already does surprisingly well: short-term predictions are
-good, though the model is too optimistic on intervals of 1-24 hours, and
-too pessimistic on intervals longer than a week.
+This model already does surprisingly well: short-term predictions are good, though the model is too optimistic on intervals of 1-24 hours, and too pessimistic on intervals longer than a week.
 
 ``` r
 pred_h_24h <- predict_recall(d_seq_list_single,
@@ -516,24 +508,20 @@ d_h_24h <- d_last[pred_h_24h, on = .(id)]
 p_h_24h <- plot_comparison(d_model = d_h_24h, 
                            n_w = 1, 
                            label_pos = list(data = list(x = 35000, y = .5), 
-                                            model = list(x = 12000, y = .2))) +
+                                            model = list(x = 12000, y = .2)),
+                           print_plot = FALSE) +
   geom_rect(data = window_range[n_windows == 25 & window == 17], aes(xmin  = start/60, xmax = end/60, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
-```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-26-1.png)<!-- -->
-
-``` r
 p_h_24h
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-26-2.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-26-1.png)
 
 ## Short intervals
 
 ### Threshold
 
-Finally, we’ll look at a model with default parameters other than the
-threshold, which is fitted to short intervals (0-10 minutes) only.
+Finally, we'll look at a model with default parameters other than the threshold, which is fitted to short intervals (0-10 minutes) only. This model clearly illustrates the problem of underpredicting retention between sessions when we extrapolate from a single-session fit.
 
 ``` r
 pred_tau_short <- predict_recall(d_seq_list_single,
@@ -543,24 +531,18 @@ d_tau_short <- d_last[pred_tau_short, on = .(id)]
 p_tau_short <- plot_comparison(d_model = d_tau_short, 
                                n_w = 1, 
                                label_pos = list(data = list(x = 35000, y = .5), 
-                                                model = list(x = 35000, y = .08))) +
+                                                model = list(x = 35000, y = .08)),
+                               print_plot = FALSE) +
   geom_rect(aes(xmin  = min(window_range$start)/60, xmax = 10, ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
-```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-27-1.png)<!-- -->
-
-``` r
 p_tau_short
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-27-2.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-27-1.png)
 
 # Time-dependent parameters
 
-Rather than using a single parameter configuration across the range, we
-can also fit parameters separately per time bin. Here we’ll look at the
-results when the data are split into 20 bins, each containing 5% of the
-total.
+Rather than using a single parameter configuration across the range, we can also fit parameters separately per time bin. Here we'll look at the results when the data are split into 20 bins, each containing 5% of the total.
 
 Prepare the data:
 
@@ -582,9 +564,9 @@ p_tau_20 <- plot_comparison(d_model = d_tau_20,
                                              model = list(x = 20000, y = .35)))
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-29-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-29-1.png)
 
-Parameter change over time:
+Plotting the optimal parameter per time bin shows a systematic change over time (note the log-transformed x-axis):
 
 ``` r
 lr_tau_viz <- lr_tau[window_range, on = .(n_windows, window)]
@@ -600,10 +582,9 @@ p_tau_time <- plot_parameter(d_parameter = lr_tau_viz,
 
     ## Warning: Transformation introduced infinite values in continuous x-axis
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-30-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-30-1.png)
 
-LM-based
-fit:
+How well does the model fit if we use the fitted LM to set the threshold?
 
 ``` r
 m_tau <- lm(parameter ~ log(geom_mean), data = lr_tau_viz[n_windows == 20])
@@ -624,9 +605,94 @@ p_tau_lm <- plot_comparison(d_model = d_tau_lm,
                                              model = list(x = 20000, y = .29)))
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-31-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-31-1.png)
+
+The figure below shows the optimal model parameter for different numbers of bins, and confirms that the 20-bin split is not qualitatively different from other comparable splits.
+
+``` r
+p_tau_n <- map(n_windows, function(n_w) {
+  p_n <- plot_parameter(d_parameter = lr_tau_viz,
+                        parameter_name = quote(tau),
+                        n_w = n_w,
+                        print_plot = FALSE) +
+    labs(x = "Interval",
+         y = "Parameter",
+         title = paste("Bins:", n_w))
+  p_n
+})
+```
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+``` r
+do.call("grid.arrange", c(p_tau_n, ncol = 4))
+```
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning in qt((1 - level)/2, df): NaNs produced
+
+    ## Warning in max(ids, na.rm = TRUE): no non-missing arguments to max;
+    ## returning -Inf
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-32-1.png)
 
 ## Decay
+
+Here we keep the threshold fixed but find the optimal decay parameter in each of the 20 bins.
 
 ``` r
 pred_d_20 <- predict_recall(seq_list = d_20_seq,
@@ -642,10 +708,9 @@ p_d_20 <- plot_comparison(d_model = d_d_20,
                                            model = list(x = 20000, y = .35)))
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-32-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-33-1.png)
 
-Parameter change over
-time:
+The decay parameter also changes over time in a systematic fashion (note the log-transformed x-axis). Interestingly, ACT-R's default value for this parameter is 0.5, which matches what we find for intervals up to a few minutes in length.
 
 ``` r
 bs_d_viz <- bs_d_indiv[window_range, on = .(n_windows, window)][, .(d = median(d)), by = .(n_windows, window, start, end, geom_mean)]
@@ -661,9 +726,9 @@ p_d_time <- plot_parameter(d_parameter = bs_d_viz,
 
     ## Warning: Transformation introduced infinite values in continuous x-axis
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-33-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-34-1.png)
 
-LM-based fit:
+Model predictions when the decay parameter is determined by the fitted LM:
 
 ``` r
 m_d <- lm(parameter ~ log(geom_mean), data = bs_d_viz[n_windows == 20])
@@ -684,9 +749,94 @@ p_d_lm <- plot_comparison(d_model = d_d_lm,
                                            model = list(x = 30000, y = .64)))
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-34-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-35-1.png)
+
+The figure below shows the optimal model parameter for different numbers of bins, and confirms that the 20-bin split is not qualitatively different from other comparable splits.
+
+``` r
+p_d_n <- map(n_windows, function(n_w) {
+  p_n <- plot_parameter(d_parameter = bs_d_viz,
+                        parameter_name = quote(italic(d)),
+                        n_w = n_w,
+                        print_plot = FALSE) +
+    labs(x = "Interval",
+         y = "Parameter",
+         title = paste("Bins:", n_w))
+  p_n
+})
+```
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+``` r
+do.call("grid.arrange", c(p_d_n, ncol = 4))
+```
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning in qt((1 - level)/2, df): NaNs produced
+
+    ## Warning in max(ids, na.rm = TRUE): no non-missing arguments to max;
+    ## returning -Inf
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-36-1.png)
 
 ## Scaling factor
+
+Here the scaling factor is fitted separately on each time bin, while the threshold and decay stay constant.
 
 ``` r
 pred_h_20 <- predict_recall(seq_list = d_20_seq,
@@ -702,10 +852,9 @@ p_h_20 <- plot_comparison(d_model = d_h_20,
                                            model = list(x = 20000, y = .35)))
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-35-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-37-1.png)
 
-Parameter change over
-time:
+Once again, there is a consistent change in the parameter over time (note that here both axes are log-transformed):
 
 ``` r
 bs_h_viz <- bs_h_indiv[window_range, on = .(n_windows, window)][, .(h = median(h)), by = .(n_windows, window, start, end, geom_mean)]
@@ -714,7 +863,8 @@ setnames(bs_h_viz, "h", "parameter")
 p_h_time <- plot_parameter(d_parameter = bs_h_viz,
                            parameter_name = quote(ln(italic(h))),
                            log_y = TRUE,
-                           n_w = 20) +
+                           n_w = 20,
+                           print_plot = FALSE) +
   coord_cartesian(xlim = c(window_range[1, start], window_range[.N, end])/60, ylim = c(.001, 1.2), clip = "off") +
   theme(axis.text.y = element_text(margin = margin(r = 8)))
 ```
@@ -722,17 +872,7 @@ p_h_time <- plot_parameter(d_parameter = bs_h_viz,
     ## Scale for 'x' is already present. Adding another scale for 'x', which
     ## will replace the existing scale.
 
-    ## Warning: Transformation introduced infinite values in continuous y-axis
-
-    ## Warning: Transformation introduced infinite values in continuous x-axis
-
-    ## Warning: Transformation introduced infinite values in continuous y-axis
-
-    ## Warning in scale$trans$transform(coord_limits): NaNs produced
-
     ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
-
-![](03_plot_results_files/figure-gfm/unnamed-chunk-36-1.png)<!-- -->
 
 ``` r
 p_h_time
@@ -744,7 +884,213 @@ p_h_time
 
     ## Warning: Transformation introduced infinite values in continuous y-axis
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-36-2.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-38-1.png)
+
+Model predictions when the scaling factor is determined by the fitted LM:
+
+``` r
+m_h <- lm(log(parameter) ~ log(geom_mean), data = bs_h_viz[n_windows == 20])
+
+d_h_lm <- map_dfr(d_20_seq, function(x) {
+  list(id = x$id, geom_mean = x$time_between)
+})
+
+d_h_lm$h <- exp(predict(m_h, newdata = d_h_lm))
+setDT(d_h_lm)
+
+pred_h_lm <- predict_recall(seq_list = d_20_seq, h = d_h_lm, tau = lr_activation, windows = 20)
+d_h_lm <- d_last[pred_h_lm, on = .(id)]
+
+p_h_lm <- plot_comparison(d_model = d_h_lm,
+                          n_w = 20, 
+                          label_pos = list(data = list(x = 35000, y = .5), 
+                                           model = list(x = 30000, y = .64)))
+```
+
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-39-1.png)
+
+The figure below shows the optimal model parameter for different numbers of bins, and confirms that the 20-bin split is not qualitatively different from other comparable splits, at least those with fewer bins. Splits with more bins seem to suffer from excessive noise.
+
+``` r
+p_h_n <- map(n_windows, function(n_w) {
+  p_n <- plot_parameter(d_parameter = bs_h_viz,
+                        parameter_name = quote(ln(italic(h))),
+                        log_y = TRUE,
+                        n_w = n_w,
+                        print_plot = FALSE) +
+    coord_cartesian(xlim = c(window_range[1, start], window_range[.N, end])/60, ylim = c(.001, 1.2), clip = "on") +
+    theme(axis.text.y = element_text(margin = margin(r = 8))) +
+    labs(x = "Interval",
+         y = "Parameter",
+         title = paste("Bins:", n_w))
+  p_n
+})
+```
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+    ## Scale for 'x' is already present. Adding another scale for 'x', which
+    ## will replace the existing scale.
+
+    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+
+``` r
+do.call("grid.arrange", c(p_h_n, ncol = 4))
+```
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning in qt((1 - level)/2, df): NaNs produced
+
+    ## Warning in max(ids, na.rm = TRUE): no non-missing arguments to max;
+    ## returning -Inf
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-40-1.png)
 
 # Interval distribution
 
@@ -777,7 +1123,7 @@ p_histogram <- ggplot() +
 p_histogram
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-37-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-41-1.png)
 
 # Combined figures
 
@@ -794,7 +1140,7 @@ plot_grid(
   p_h_24h,
   p_h_20,
   ncol = 2,
-  labels = c("A\t\tInterval distribution", "B\t\tThreshold optimised for 0 - 10 min", "C\t\tThreshold optimised for 24h", "D\t\tInterval-dependent threshold", "E\t\tDecay optimised for 24h", "F\t\tInterval-dependent decay", "G\t\tScaling factor optimised for 24h", "H\t\tInterval-dependent scaling factor"),
+  labels = c("a\t\tInterval distribution", "b\t\tThreshold optimised for 0 - 10 min", "c\t\tThreshold optimised for 24h", "d\t\tInterval-dependent threshold", "e\t\tDecay optimised for 24h", "f\t\tInterval-dependent decay", "g\t\tScaling factor optimised for 24h", "h\t\tInterval-dependent scaling factor"),
   align = "hv",
   label_x = .025,
   hjust = 0,
@@ -803,7 +1149,7 @@ plot_grid(
   theme(plot.background = element_rect(fill = "white", colour = NA))
 ```
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-38-1.png)<!-- -->
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-42-1.png)
 
 ``` r
 ggsave(file.path("..", "output", "model_fitting_results.png"), width = 10, height = 15)
@@ -815,7 +1161,7 @@ ggsave(file.path("..", "output", "model_fitting_results.png"), width = 10, heigh
 plot_grid(
   p_tau_time, p_d_time, p_h_time,
   ncol = 3, 
-  labels = c("A\t\tInterval-dependent threshold", "B\t\tInterval-dependent decay", "C\t\tInterval-dependent h"),
+  labels = c("a\t\tInterval-dependent threshold", "b\t\tInterval-dependent decay", "c\t\tInterval-dependent h"),
   align = "hv",
   label_x = .025,
   hjust = 0,
@@ -825,17 +1171,59 @@ plot_grid(
 ```
 
     ## Warning: Transformation introduced infinite values in continuous x-axis
-    
-    ## Warning: Transformation introduced infinite values in continuous x-axis
-
-    ## Warning: Transformation introduced infinite values in continuous y-axis
 
     ## Warning: Transformation introduced infinite values in continuous x-axis
 
     ## Warning: Transformation introduced infinite values in continuous y-axis
 
-![](03_plot_results_files/figure-gfm/unnamed-chunk-39-1.png)<!-- -->
+    ## Warning: Transformation introduced infinite values in continuous x-axis
+
+    ## Warning: Transformation introduced infinite values in continuous y-axis
+
+![](03_plot_results_files/figure-markdown_github/unnamed-chunk-43-1.png)
 
 ``` r
 ggsave(file.path("..", "output", "params_time.png"), width = 12, height = 4)
 ```
+
+# Session info
+
+``` r
+sessionInfo()
+```
+
+    ## R version 3.6.3 (2020-02-29)
+    ## Platform: x86_64-pc-linux-gnu (64-bit)
+    ## Running under: Ubuntu 18.04.6 LTS
+    ## 
+    ## Matrix products: default
+    ## BLAS:   /usr/lib/x86_64-linux-gnu/blas/libblas.so.3.7.1
+    ## LAPACK: /usr/lib/x86_64-linux-gnu/lapack/liblapack.so.3.7.1
+    ## 
+    ## locale:
+    ##  [1] LC_CTYPE=en_US.UTF-8       LC_NUMERIC=C              
+    ##  [3] LC_TIME=en_GB.UTF-8        LC_COLLATE=en_US.UTF-8    
+    ##  [5] LC_MONETARY=en_GB.UTF-8    LC_MESSAGES=en_US.UTF-8   
+    ##  [7] LC_PAPER=en_GB.UTF-8       LC_NAME=C                 
+    ##  [9] LC_ADDRESS=C               LC_TELEPHONE=C            
+    ## [11] LC_MEASUREMENT=en_GB.UTF-8 LC_IDENTIFICATION=C       
+    ## 
+    ## attached base packages:
+    ## [1] stats     graphics  grDevices utils     datasets  methods   base     
+    ## 
+    ## other attached packages:
+    ## [1] gridExtra_2.3     cowplot_0.9.4     ggplot2_3.3.5     purrr_0.3.2      
+    ## [5] dplyr_1.0.7       data.table_1.13.6
+    ## 
+    ## loaded via a namespace (and not attached):
+    ##  [1] Rcpp_1.0.6       pillar_1.6.3     compiler_3.6.3   tools_3.6.3     
+    ##  [5] digest_0.6.19    lattice_0.20-41  nlme_3.1-149     jsonlite_1.6    
+    ##  [9] evaluate_0.14    lifecycle_1.0.1  tibble_2.1.3     gtable_0.3.0    
+    ## [13] mgcv_1.8-28      pkgconfig_2.0.2  rlang_0.4.10     Matrix_1.2-18   
+    ## [17] DBI_1.1.0        yaml_2.2.0       xfun_0.21        withr_2.3.0     
+    ## [21] stringr_1.4.0    knitr_1.23       generics_0.1.0   vctrs_0.3.8     
+    ## [25] grid_3.6.3       tidyselect_1.1.1 glue_1.4.2       R6_2.4.0        
+    ## [29] fansi_0.4.0      rmarkdown_2.6    farver_2.1.0     magrittr_2.0.1  
+    ## [33] splines_3.6.3    scales_1.1.1     ellipsis_0.3.2   htmltools_0.3.6 
+    ## [37] colorspace_1.4-1 labeling_0.3     utf8_1.1.4       stringi_1.4.3   
+    ## [41] munsell_0.5.0    crayon_1.4.1
