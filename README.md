@@ -5,8 +5,8 @@ This repository contains the code associated with the manuscript **Explaining fo
 
 ## Analysis notebooks
 
-- [Fitting the models to the data](./output/02_fit_models.md)
-- [Visualisations of model fits and parameters](./output/03_plot_results.md)
+- [Walkthrough of the model and the fitting method](./output/02_walkthrough.md)
+- [Fitting the models to the data](./output/03_fit_models.md)
 
 
 ## Rerunning the code
