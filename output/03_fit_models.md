@@ -1,50 +1,38 @@
 Fit memory models
 ================
 Maarten van der Velde
-Last updated: 2026-01-16
+Last updated: 2026-06-12
 
 - [Outline](#outline)
 - [Setup](#setup)
   - [Model fitting setup](#model-fitting-setup)
   - [Data setup](#data-setup)
-    - [Create subsets](#create-subsets)
-    - [Define time bins](#define-time-bins)
+  - [Set up cross-validation](#set-up-cross-validation)
 - [Fit models](#fit-models)
-  - [Parametric function](#parametric-function)
-  - [Fitted parameters](#fitted-parameters)
-    - [Regular fit](#regular-fit)
-    - [Fit by learner](#fit-by-learner)
-    - [Fit by amount of practice](#fit-by-amount-of-practice)
-- [Evaluate models](#evaluate-models)
-  - [Predict recall](#predict-recall)
+- [Fitted parameters](#fitted-parameters)
+  - [Regular fit](#regular-fit)
+- [Predict test set data](#predict-test-set-data)
+  - [Model comparison](#model-comparison)
   - [Visualise fit](#visualise-fit)
     - [Regular fit](#regular-fit-1)
-    - [Fit by learner](#fit-by-learner-1)
+    - [Fit by learner](#fit-by-learner)
     - [Fit by practice](#fit-by-practice)
-  - [Goodness of fit](#goodness-of-fit)
-    - [Log-likelihood](#log-likelihood)
-    - [AIC](#aic)
-    - [Akaike weights](#akaike-weights)
-    - [ROC](#roc)
-    - [Bin-wise log-likelihood](#bin-wise-log-likelihood)
 - [Visualisations](#visualisations)
 - [Session info](#session-info)
 
 # Outline
 
 This notebook fits various configurations of the memory model to the
-full set of retrieval practice data. We vary the following factors:
+retrieval practice data, using k-fold cross-validation to evaluate
+predictive performance.
+
+We vary the following factors:
 
 - **Subset**: fit all data, fit by learner, fit by amount of practice
 - **Temporal scope**: fit all intervals, only short intervals (0-10
   min), only intervals around 24 h, different numbers of time bins
 - **Parameter**: fit retrieval threshold $\tau$, decay $d$, scaling
   factor $h$
-
-Finally, the fitted models are compared in terms of goodness of fit.
-Since the fits use different numbers of parameters and slightly
-different subsets of the full dataset, the comparison uses average
-Akaike Information Criterion (AIC) scores.
 
 # Setup
 
@@ -53,6 +41,7 @@ library(data.table)
 library(purrr)
 library(furrr)
 library(here)
+library(caret)
 library(ggplot2)
 library(patchwork)
 library(ggtext)
@@ -83,39 +72,52 @@ model_params <- list(
 )
 ```
 
+We want to try different splits of the data, ranging from a single
+window that includes everything to 20 windows. Once we go beyond 20
+windows, we run into the issues that certain windows end up empty in
+some of the cross-validation folds, which makes it impossible to fit and
+evaluate the model.
+
+``` r
+n_windows <- c(1, 2, 5, 10, 20)
+```
+
 ## Data setup
 
 ``` r
 d_f <- fread(file.path("..", "data", "cogpsych_data_formatted.csv"))
+head(d_f)
 ```
+
+    ##                          id              user   fact                time
+    ##                      <char>            <char> <char>              <POSc>
+    ## 1: 17_18_EN_anon-001_1174_1 17_18_EN_anon-001 1174_1 2017-10-14 14:59:39
+    ## 2: 17_18_EN_anon-001_1174_1 17_18_EN_anon-001 1174_1 2017-10-14 14:59:47
+    ## 3: 17_18_EN_anon-001_1174_1 17_18_EN_anon-001 1174_1 2017-10-14 15:00:50
+    ## 4: 17_18_EN_anon-001_1174_1 17_18_EN_anon-001 1174_1 2017-10-23 13:38:26
+    ## 5: 17_18_EN_anon-001_1175_1 17_18_EN_anon-001 1175_1 2017-10-14 14:59:53
+    ## 6: 17_18_EN_anon-001_1175_1 17_18_EN_anon-001 1175_1 2017-10-14 15:00:03
+    ##    presentation_start_time time_since_session_start time_until_session_end
+    ##                      <num>                    <num>                  <num>
+    ## 1:                   0.000                   22.902                270.124
+    ## 2:                   6.025                   28.927                264.099
+    ## 3:                  69.202                   92.104                200.922
+    ## 4:              772723.277                   83.507                156.135
+    ## 5:                   0.000                   38.021                255.005
+    ## 6:                   6.204                   44.225                248.801
+    ##    correct    rt time_between time_within
+    ##      <int> <int>        <num>       <num>
+    ## 1:       1  6018     772369.6     353.631
+    ## 2:       1  4442     772369.6     347.606
+    ## 3:       1  3418     772369.6     284.429
+    ## 4:       1  4002     772369.6     239.642
+    ## 5:       1  4790     772369.6     326.961
+    ## 6:       1  2592     772369.6     320.757
 
 Each user-fact pair has a single learning sequence associated with it,
 consisting of three or more trials in one session and the first trial in
-the next session.
-
-Isolate the last observation per learning sequence (i.e., the one after
-the between-session interval). This is the observation that the model
-has to predict, given all prior observations in the sequence.
-
-``` r
-d_last <- d_f[, .SD[.N], by = id]
-```
-
-### Create subsets
-
-Split the data by learner, so that we can fit each learner’s data
-separately.
-
-``` r
-d_f_by_learner <- split(d_f, by = "user")
-d_last_by_learner <- split(d_last, by = "user")
-```
-
-Split the data by the amount of practice (i.e., the number of trials
-within a sequence), so that we can fit different amounts of practice
-separately. Each sequence consists of at least 4 trials. To keep things
-manageable, we group sequences with over 21 trials into a single “21+”
-bucket.
+the next session. The total number of trials in the sequence varies
+across sequences:
 
 ``` r
 trials_by_id <- d_f[, .(trials = .N), by = .(id)]
@@ -123,24 +125,55 @@ trials_by_id[, trials := factor(ifelse(trials < 21, trials, "21+"),
                                 levels = c(4:20, "21+"))]
 
 d_f <- d_f[trials_by_id, on = "id"]
-d_last <- d_last[trials_by_id, on = "id"]
 
-d_f_by_practice <- split(d_f, by = "trials")
-d_last_by_practice <- split(d_last, by = "trials")
+p_seq_length <- ggplot(trials_by_id, aes(x = trials)) +
+  geom_bar(fill = window_col) +
+  labs(x = "Number of trials in the sequence", y = "Number of sequences")
+
+ggsave(here("output", "sequence_length_distribution.png"), p_seq_length, width = 6, height = 4)
 ```
 
-### Define time bins
+![](../output/sequence_length_distribution.png)
 
-Split the data by the between-session interval. This interval ranges
-from seconds to weeks. We vary the number of splits (windows) between 1
-(all data in a single window) and 20. Window ranges are equally sized on
-a logarithmic scale; the middle of each window is the geometric mean of
-its boundaries.
+Isolate the last observation per learning sequence (i.e., the one after
+the between-session interval). This is the observation that the model
+has to predict, given all prior observations in the sequence.
 
 ``` r
-n_windows <- c(1, 5, 10, 20)
+d_last <- d_f[, .SD[.N], by = id]
+head(d_last)
+```
 
-window_range <- map(n_windows, function (n_w) {
+    ##                          id              user   fact                time
+    ##                      <char>            <char> <char>              <POSc>
+    ## 1: 17_18_EN_anon-001_1174_1 17_18_EN_anon-001 1174_1 2017-10-23 13:38:26
+    ## 2: 17_18_EN_anon-001_1175_1 17_18_EN_anon-001 1175_1 2017-10-23 13:38:15
+    ## 3: 17_18_EN_anon-001_1176_1 17_18_EN_anon-001 1176_1 2017-10-23 13:38:54
+    ## 4: 17_18_EN_anon-001_1177_1 17_18_EN_anon-001 1177_1 2017-10-23 13:37:40
+    ## 5: 17_18_EN_anon-001_1178_1 17_18_EN_anon-001 1178_1 2017-10-23 13:38:34
+    ## 6: 17_18_EN_anon-001_1179_1 17_18_EN_anon-001 1179_1 2017-10-23 13:37:52
+    ##    presentation_start_time time_since_session_start time_until_session_end
+    ##                      <num>                    <num>                  <num>
+    ## 1:                772723.3                   83.507                156.135
+    ## 2:                772696.6                   71.956                167.686
+    ## 3:                772734.4                  114.562                125.080
+    ## 4:                772637.2                   36.915                202.727
+    ## 5:                772689.5                   94.898                144.744
+    ## 6:                772599.7                   50.299                189.343
+    ##    correct    rt time_between time_within trials
+    ##      <int> <int>        <num>       <num> <fctr>
+    ## 1:       1  4002     772369.6     239.642      4
+    ## 2:       1  4886     772369.6     239.642      4
+    ## 3:       1  4900     772369.6     239.642      4
+    ## 4:       0  5786     772369.6     239.642      5
+    ## 5:       1  3422     772369.6     239.642      4
+    ## 6:       0  3846     772369.6     239.642      5
+
+Define the time windows for all splits of the data (time values are in
+seconds).
+
+``` r
+window_range <- map_dfr(n_windows, function (n_w) {
 
   d_windows <- copy(d_last)
   
@@ -148,7 +181,7 @@ window_range <- map(n_windows, function (n_w) {
     d_windows[, window := 1]
   } else {
     d_windows[, window := cut(log(time_between), breaks = n_w, labels = FALSE)]
-  }  
+  }
   
   # Get the window range(s)
   window_range <- d_windows[, .(start = min(time_between), end = max(time_between)), by = .(window)]
@@ -158,11 +191,20 @@ window_range <- map(n_windows, function (n_w) {
   window_range[, n_windows := n_w]
 
   return (window_range)
-}) |>
-  rbindlist()
+})
 
 window_range[, window_type := "regular"]
 ```
+
+    ## Warning in `[.data.table`(window_range, , `:=`(window_type, "regular")): A
+    ## shallow copy of this data.table was taken so that := can add or remove 1
+    ## columns by reference. At an earlier point, this data.table was copied by R (or
+    ## was created manually using structure() or similar). Avoid names<- and attr<-
+    ## which in R currently (and oddly) may copy the whole data.table. Use set* syntax
+    ## instead to avoid copying: ?set, ?setnames and ?setattr. It's also not unusual
+    ## for data.table-agnostic packages to produce tables affected by this issue. If
+    ## this message doesn't help, please report your use case to the data.table issue
+    ## tracker so the root cause can be fixed or this message improved.
 
 We’ll also include a “short” window (0-10 min) and a “24h” window
 (23.5-24.5h), to see how well the model performs if fitted only to these
@@ -195,43 +237,45 @@ window_range
     ##     window       start         end    geom_mean n_windows window_type window_id
     ##      <num>       <num>       <num>        <num>     <num>      <char>     <int>
     ##  1:      1      38.363 4605678.952 1.329239e+04         1     regular         1
-    ##  2:      1      38.363     395.179 1.231270e+02         5     regular         2
-    ##  3:      2     398.261    4117.753 1.280602e+03         5     regular         3
-    ##  4:      3    4159.798   42791.651 1.334184e+04         5     regular         4
-    ##  5:      4   42824.538  441248.032 1.374636e+05         5     regular         5
-    ##  6:      5  444687.072 4605678.952 1.431114e+06         5     regular         6
-    ##  7:      1      38.363     121.254 6.820313e+01        10     regular         7
-    ##  8:      2     123.599     395.179 2.210062e+02        10     regular         8
-    ##  9:      3     398.261    1281.285 7.143429e+02        10     regular         9
-    ## 10:      4    1285.922    4117.753 2.301110e+03        10     regular        10
-    ## 11:      5    4159.798   13238.121 7.420776e+03        10     regular        11
-    ## 12:      6   13371.307   42791.651 2.392029e+04        10     regular        12
-    ## 13:      7   42824.538  137553.313 7.675062e+04        10     regular        13
-    ## 14:      8  138609.908  441248.032 2.473082e+05        10     regular        14
-    ## 15:      9  444687.072 1410000.229 7.918389e+05        10     regular        15
-    ## 16:     10 1458368.507 4605678.952 2.591675e+06        10     regular        16
-    ## 17:      1      38.363      68.673 5.132740e+01        20     regular        17
-    ## 18:      2      68.949     121.254 9.143491e+01        20     regular        18
-    ## 19:      3     123.599     220.979 1.652658e+02        20     regular        19
-    ## 20:      4     224.688     395.179 2.979798e+02        20     regular        20
-    ## 21:      5     398.261     713.152 5.329359e+02        20     regular        21
-    ## 22:      6     719.106    1281.285 9.598853e+02        20     regular        22
-    ## 23:      7    1285.922    2299.810 1.719702e+03        20     regular        23
-    ## 24:      8    2304.114    4117.753 3.080223e+03        20     regular        24
-    ## 25:      9    4159.798    7391.788 5.545119e+03        20     regular        25
-    ## 26:     10    7453.841   13238.121 9.933521e+03        20     regular        26
-    ## 27:     11   13371.307   23490.675 1.772290e+04        20     regular        27
-    ## 28:     12   24164.364   42791.651 3.215638e+04        20     regular        28
-    ## 29:     13   42824.538   76709.850 5.731548e+04        20     regular        29
-    ## 30:     14   76959.026  137553.313 1.028881e+05        20     regular        30
-    ## 31:     15  138609.908  247039.671 1.850463e+05        20     regular        31
-    ## 32:     16  247494.955  441248.032 3.304643e+05        20     regular        32
-    ## 33:     17  444687.072  792104.104 5.934968e+05        20     regular        33
-    ## 34:     18  808071.110 1410000.229 1.067418e+06        20     regular        34
-    ## 35:     19 1458368.507 2566018.703 1.934477e+06        20     regular        35
-    ## 36:     20 2573482.617 4605678.952 3.442766e+06        20     regular        36
-    ## 37:      1      38.363     600.000 1.517162e+02         1       short        37
-    ## 38:      1   84600.000   88200.000 8.638125e+04         1         24h        38
+    ##  2:      1      38.363   13238.121 7.126388e+02         2     regular         2
+    ##  3:      2   13371.307 4605678.952 2.481611e+05         2     regular         3
+    ##  4:      1      38.363     395.179 1.231270e+02         5     regular         4
+    ##  5:      2     398.261    4117.753 1.280602e+03         5     regular         5
+    ##  6:      3    4159.798   42791.651 1.334184e+04         5     regular         6
+    ##  7:      4   42824.538  441248.032 1.374636e+05         5     regular         7
+    ##  8:      5  444687.072 4605678.952 1.431114e+06         5     regular         8
+    ##  9:      1      38.363     121.254 6.820313e+01        10     regular         9
+    ## 10:      2     123.599     395.179 2.210062e+02        10     regular        10
+    ## 11:      3     398.261    1281.285 7.143429e+02        10     regular        11
+    ## 12:      4    1285.922    4117.753 2.301110e+03        10     regular        12
+    ## 13:      5    4159.798   13238.121 7.420776e+03        10     regular        13
+    ## 14:      6   13371.307   42791.651 2.392029e+04        10     regular        14
+    ## 15:      7   42824.538  137553.313 7.675062e+04        10     regular        15
+    ## 16:      8  138609.908  441248.032 2.473082e+05        10     regular        16
+    ## 17:      9  444687.072 1410000.229 7.918389e+05        10     regular        17
+    ## 18:     10 1458368.507 4605678.952 2.591675e+06        10     regular        18
+    ## 19:      1      38.363      68.673 5.132740e+01        20     regular        19
+    ## 20:      2      68.949     121.254 9.143491e+01        20     regular        20
+    ## 21:      3     123.599     220.979 1.652658e+02        20     regular        21
+    ## 22:      4     224.688     395.179 2.979798e+02        20     regular        22
+    ## 23:      5     398.261     713.152 5.329359e+02        20     regular        23
+    ## 24:      6     719.106    1281.285 9.598853e+02        20     regular        24
+    ## 25:      7    1285.922    2299.810 1.719702e+03        20     regular        25
+    ## 26:      8    2304.114    4117.753 3.080223e+03        20     regular        26
+    ## 27:      9    4159.798    7391.788 5.545119e+03        20     regular        27
+    ## 28:     10    7453.841   13238.121 9.933521e+03        20     regular        28
+    ## 29:     11   13371.307   23490.675 1.772290e+04        20     regular        29
+    ## 30:     12   24164.364   42791.651 3.215638e+04        20     regular        30
+    ## 31:     13   42824.538   76709.850 5.731548e+04        20     regular        31
+    ## 32:     14   76959.026  137553.313 1.028881e+05        20     regular        32
+    ## 33:     15  138609.908  247039.671 1.850463e+05        20     regular        33
+    ## 34:     16  247494.955  441248.032 3.304643e+05        20     regular        34
+    ## 35:     17  444687.072  792104.104 5.934968e+05        20     regular        35
+    ## 36:     18  808071.110 1410000.229 1.067418e+06        20     regular        36
+    ## 37:     19 1458368.507 2566018.703 1.934477e+06        20     regular        37
+    ## 38:     20 2573482.617 4605678.952 3.442766e+06        20     regular        38
+    ## 39:      1      38.363     600.000 1.517162e+02         1       short        39
+    ## 40:      1   84600.000   88200.000 8.638125e+04         1         24h        40
     ##     window       start         end    geom_mean n_windows window_type window_id
 
 The distribution of between-session intervals looks as follows:
@@ -262,90 +306,265 @@ p_histogram <- ggplot() +
         axis.text.x = element_text(margin = margin(t = 8)),
         axis.text.x.top = element_text(margin = margin(b = 8)))
 
-p_histogram
+ggsave(here("output", "between_session_interval_distribution.png"), p_histogram, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-1-1.png)<!-- -->
+![](../output/between_session_interval_distribution.png)
+
+## Set up cross-validation
+
+To assess how well each model does at predicting new data, and to
+compare the relative performance of the different models, we’ll use
+k-fold cross validation. The model is fitted to the data from all but
+one of the folds, and used to predict recall in the held-out fold. To
+ensure that between-session intervals are equally represented in each
+fold, we stratify the folds by the window of the between-session
+interval. In addition, since one of the model variants involves fitting
+learner-specific parameters, we want to ensure that data from any single
+learner is spread across folds (as far as possible).
+
+First, identify the window in which each sequence falls, based on the
+between-session interval.
+
+``` r
+d_last <- d_last[window_range[n_windows == 20], on = .(time_between >= start, time_between <= end), window := i.window]
+```
+
+Create a stratification variable that combines the window and the
+learner ID.
+
+``` r
+d_last[, stratify := paste(window, user, sep = "_")]
+```
+
+Create stratified cross-validation folds.
+
+``` r
+k <- 5
+d_last_folds <- createFolds(d_last$stratify, k = k, list = FALSE)
+d_last[, fold := d_last_folds]
+```
+
+Verify that the between-session intervals are equally distributed across
+folds.
+
+``` r
+d_last[, .(mean = mean(time_between),
+           min = min(time_between),
+           max = max(time_between),
+           q05 = quantile(time_between, .05),
+           q25 = quantile(time_between, .25),
+           q50 = quantile(time_between, .5),
+           q75 = quantile(time_between, .75),
+           q95 = quantile(time_between, .95)
+           ), by = fold]
+```
+
+    ##     fold     mean    min     max      q05      q25      q50      q75      q95
+    ##    <int>    <num>  <num>   <num>    <num>    <num>    <num>    <num>    <num>
+    ## 1:     4 205723.4 38.363 4605679 115.3070 2795.812 71455.60 190729.2 825639.1
+    ## 2:     3 204013.9 38.363 3650704 118.6908 2810.714 71397.00 190502.7 833057.6
+    ## 3:     5 204107.2 38.363 3812538 116.7211 2828.142 72420.43 190088.0 837949.4
+    ## 4:     1 201609.4 38.363 3650704 119.3420 2988.045 72594.09 190729.2 840192.9
+    ## 5:     2 206133.6 38.363 3812538 119.2120 2912.465 72940.68 193176.7 844197.9
+
+``` r
+p_stratification_intervals <- ggplot(d_last, aes(x = time_between, fill = factor(fold))) +
+  facet_grid(fold ~ ., labeller = "label_both") +
+  geom_histogram(colour = "black") +
+  labs(x = "Time between sessions (s)", y = "Count") +
+  guides(fill = "none") +
+  scale_x_log10()
+
+ggsave(here("output", "stratification_intervals.png"), p_stratification_intervals, width = 6, height = 4)
+```
+
+    ## `stat_bin()` using `bins = 30`. Pick better value `binwidth`.
+
+![](../output/stratification_intervals.png)
+
+Is every learner represented in each fold? Note that there are some
+cases where a learner has insufficient data to be represented in all
+folds, but the vast majority of learners is represented in all folds.
+
+``` r
+d_last[, .(n_folds = length(unique(fold))), by = user][, table(n_folds)]
+```
+
+    ## n_folds
+    ##   1   2   3   4   5 
+    ##   2   2   1   3 210
+
+While we did not explicitly stratify by the amount of practice in the
+first session, we can verify that the distribution of practice amounts
+is also similar across folds.
+
+``` r
+d_last[, .(mean = mean(as.numeric(trials)),
+           min = min(as.numeric(trials)),
+           max = max(as.numeric(trials)),
+           q05 = quantile(as.numeric(trials), .05),
+           q25 = quantile(as.numeric(trials), .25),
+           q50 = quantile(as.numeric(trials), .5),
+           q75 = quantile(as.numeric(trials), .75),
+           q95 = quantile(as.numeric(trials), .95)
+), by = fold]
+```
+
+    ##     fold     mean   min   max   q05   q25   q50   q75   q95
+    ##    <int>    <num> <num> <num> <num> <num> <num> <num> <num>
+    ## 1:     4 3.507422     1    18     1     2     2     4    10
+    ## 2:     3 3.536198     1    18     1     2     2     4    10
+    ## 3:     5 3.575213     1    18     1     2     2     4    10
+    ## 4:     1 3.527009     1    18     1     2     2     4    10
+    ## 5:     2 3.533864     1    18     1     2     2     4    10
+
+``` r
+p_stratification_practice <- ggplot(d_last, aes(x = as.numeric(trials), fill = factor(fold))) +
+  facet_grid(fold ~ ., labeller = "label_both") +
+  geom_histogram(binwidth = 1, colour = "black") +
+  labs(x = "Number of trials in the first session", y = "Count") +
+  guides(fill = "none")
+
+ggsave(here("output", "stratification_practice.png"), p_stratification_practice, width = 6, height = 4)
+```
+
+![](../output/stratification_practice.png)
 
 # Fit models
 
-Define the model fitting function:
+Specify the number of cross-validation folds.
 
 ``` r
-fit_model <- function (subset = c("all", "by_learner", "by_practice")) {
+K_FOLDS <- 5
+```
 
+``` r
+fit_model_cv <- function(subset = c("all", "by_learner", "by_practice")) {
+  
   subset <- match.arg(subset)
   message("Subset: ", subset)
-
-  d_fit <- switch(subset,
-                  "all" = list(copy(d_last)),
-                  "by_learner" = copy(d_last_by_learner),
-                  "by_practice" = copy(d_last_by_practice))
   
-  # Iterate over subsets
-  fit_out <- map(d_fit, function (d_fit_sub) {
-    
-    # Iterate over window ranges
-    windows <- copy(window_range)
-    
-    # Only fit the "short" and "24h" windows to all sequences
-    if (subset != "all") {
-      windows <- windows[window_type == "regular"]
-    }
-    
-    fit_windows <- split(windows, by = "window_id")
-    fit_params <- future_map(fit_windows, function (fit_window) {
+  # --- 1. Build fold x window combinations ---
+  fold_window_combos <- CJ(fold = seq_len(K_FOLDS), window_id = window_range$window_id)
+  
+  # For by_learner and by_practice, only use regular windows
+  if (subset != "all") {
+    valid_window_ids <- window_range[window_type == "regular", window_id]
+    fold_window_combos <- fold_window_combos[window_id %in% valid_window_ids]
+  }
+  
+  # --- 2. Parallelise over all fold x window combinations ---
+  results <- future_map(
+    split(fold_window_combos, seq_len(nrow(fold_window_combos))),
+    function(combo) {
       
-      # Only include sequences within the window bounds: <start, end]
-      # But: if this is the first window, do include the lower bound
-      if (fit_window$window == 1) {
-        d_fit_sub_window <- d_fit_sub[time_between >= fit_window$start & time_between <= fit_window$end]
+      fold_id           <- combo$fold
+      current_window_id <- combo$window_id
+      fit_window        <- window_range[window_id == current_window_id]
+      
+      # Split into train / test on d_last
+      d_train <- d_last[fold != fold_id]
+      d_test  <- d_last[fold == fold_id]
+      
+      # Subset training data by learner or practice if needed
+      d_train_sub <- switch(subset,
+        "all"         = list(d_train),
+        "by_learner"  = split(d_train, by = "user"),
+        "by_practice" = split(d_train, by = "trials")
+      )
+      
+      # --- 3. Fit parameters on training data, aggregate to median per group ---
+      params_list <- map(d_train_sub, function(d_sub) {
+        
+        # Only include sequences within the window bounds: [start, end]
+        d_sub_window <- d_sub[time_between >= fit_window$start & time_between <= fit_window$end]
+        
+        # To identify parameters, require at least 3 responses in the window,
+        # with a mix of correct and incorrect responses
+        if (!(nrow(d_sub_window) >= 3 && between(mean(d_sub_window$correct), 0, 1, incbounds = FALSE))) {
+          return(NULL)
+        }
+        
+        # Prepare sequences and fit
+        d_sub_window[, window   := fit_window$window]
+        d_sub_window[, sequence := 1:.N]
+        d_sub_window <- d_f[d_sub_window[, .(id, window, sequence)], on = .(id)]
+        seqs   <- generate_seq_list(d_sub_window)
+        params <- fit_parameters(seqs, model_params)
+        
+        # Aggregate to a single parameter set per group (median d and h;
+        # tau is constant within group so first value suffices)
+        params_agg <- params[, .(
+          tau = first(tau),
+          d   = median(d, na.rm = TRUE),
+          h   = median(h, na.rm = TRUE)
+        )]
+        
+        sub_label <- switch(subset,
+          "all"         = NA_character_,
+          "by_learner"  = d_sub[1, user],
+          "by_practice" = as.character(d_sub[1, trials])
+        )
+        
+        cbind(
+          data.table(fold = fold_id, window_id = current_window_id, sub_label = sub_label),
+          params_agg
+        )
+      })
+      
+      params_dt <- rbindlist(discard(params_list, is.null))
+      
+      if (nrow(params_dt) == 0) return(NULL)
+      
+      # --- 4. Filter test data to this window (unless extrapolating) ---
+      extrapolate_outside_fitted_window <- fit_window[1, window_type %in% c("short", "24h")]
+      
+      if (extrapolate_outside_fitted_window) {
+        d_test_window <- copy(d_test)
       } else {
-        d_fit_sub_window <- d_fit_sub[time_between > fit_window$start & time_between <= fit_window$end]
+        d_test_window <- d_test[time_between >= fit_window$start & time_between <= fit_window$end]
       }
       
-      # To identify parameters, require at least 3 responses in the window, with a mix of correct and incorrect responses
-      if (!(nrow(d_fit_sub_window) >= 3 && between(mean(d_fit_sub_window$correct), 0, 1, incbounds = FALSE))) {
-        return (NULL)
-      }
+      if (nrow(d_test_window) == 0) return(NULL)
       
-      # Prepare data
-      d_fit_sub_window[, window := fit_window$window]
-      d_fit_sub_window[, sequence := 1:.N]
-      d_fit_sub_window <- d_f[d_fit_sub_window[, .(id, window, sequence)], on = .(id)]
-      d_fit_sub_window_seqs <- generate_seq_list(d_fit_sub_window)
+      # --- 5. Match test observations to fitted parameters by sub_label ---
+      d_test_window[, sub_label := switch(subset,
+        "all"         = NA_character_,
+        "by_learner"  = user,
+        "by_practice" = as.character(trials)
+      )]
       
-      # Fit parameters
-      d_fit_sub_window_params <- fit_parameters(d_fit_sub_window_seqs, model_params)
+      d_test_window[params_dt, c("tau", "d", "h") := .(i.tau, i.d, i.h), on = .(sub_label)]
       
-      # Add subgroup info and window ID
-      sub_label <- switch(subset,
-                          "all" = NA,
-                          "by_learner" = d_fit_sub[1, user],
-                          "by_practice" = d_fit_sub[1, trials])
+      # Flag test observations with no matching fitted parameters
+      d_test_window[, has_params := !is.na(tau)]
+      d_test_window[, window_id  := current_window_id]
       
-      d_fit_sub_window_params <- cbind(fit_window[, .(window_id)], sub_label, d_fit_sub_window_params)
-      
-      return (d_fit_sub_window_params)
-    })
-    
-    return (fit_params)
-  }, .progress = interactive())
+      # --- 6. Return fitted params and annotated test set ---
+      list(
+        params = params_dt,
+        test   = d_test_window
+      )
+    },
+    .progress = FALSE
+  )
   
-  # Only keep window fits with observations
-  fit_out <- discard(flatten(fit_out), is.null)
+  # --- 7. Aggregate results ---
+  results    <- discard(results, is.null)
+  params_all <- rbindlist(map(results, "params"))
+  test_all   <- rbindlist(map(results, "test"), fill = TRUE)
   
-  # Convert list to data.table
-  fit_out <- rbindlist(fit_out)
+  # Add window info to params
+  params_all <- cbind(data.table(subset = subset), params_all)
+  params_all <- window_range[params_all, on = .(window_id)]
   
-  # Add window information
-  fit_out <- fit_out[window_range, on = .(window_id)][!is.na(id)]
-
-  # Add subset information
-  fit_out <- cbind(data.table(subset = subset), fit_out)
+  test_all <- cbind(data.table(subset = subset), test_all)
   
-  return (fit_out)
-  
+  list(
+    params = params_all,
+    test   = test_all
+  )
 }
 ```
 
@@ -355,85 +574,84 @@ Fit all variants of the model (note: this can take a while!). (Set
 ``` r
 use_saved_fit <- TRUE
 
-fit_all_path <- here("data", "fit_all.csv")
-fit_by_learner_path <- here("data", "fit_by_learner.csv")
-fit_by_practice_path <- here("data", "fit_by_practice.csv")
+subsets <- c("all", "by_learner", "by_practice")
 
-if (!use_saved_fit | !file.exists(fit_all_path)) {
-  fit_all <- fit_model(subset = "all")
-  fwrite(fit_all, fit_all_path)
-} else {
-  fit_all <- fread(fit_all_path)
-}
+paths <- rbindlist(lapply(subsets, function(s) {
+  data.table(
+    subset       = s,
+    params_path  = here("data", paste0("fit_", s, "_params.csv")),
+    test_path    = here("data", paste0("fit_", s, "_test.csv"))
+  )
+}))
 
-if (!use_saved_fit | !file.exists(fit_by_learner_path)) {
-  fit_by_learner <- fit_model(subset = "by_learner")
-  fwrite(fit_by_learner, fit_by_learner_path)
-} else {
-  fit_by_learner <- fread(fit_by_learner_path)
-}
-
-if (!use_saved_fit | !file.exists(fit_by_practice_path)) {
-  fit_by_practice <- fit_model(subset = "by_practice")
-  fwrite(fit_by_practice, fit_by_practice_path)
-} else {
-  fit_by_practice <- fread(fit_by_practice_path)
-}
-
-fits <- rbind(fit_all, fit_by_learner, fit_by_practice)
-```
-
-### Parametric function
-
-In addition to window-specific fits, we can also include a linear model
-fit based on the window-wise parameter estimates. We only do this for
-the 20-window split.
-
-``` r
-fit_by_window <- fits[n_windows == 20, .(tau = tau[1], d = median(d), h = median(h)), by = .(subset, sub_label, n_windows, window)]
-fit_by_window <- fit_by_window[window_range[n_windows == 20, .(n_windows, window, geom_mean)], on = .(n_windows, window)]
-
-# Fit a linear model for each set of parameter estimates
-fit_lm <- function (geom_mean, param, log_param = FALSE) {
-  if (log_param) {
-    param <- log(param)
-  }
-  m <- lm(param ~ log(geom_mean))
+fit_results <- lapply(subsets, function(s) {
+  p <- paths[subset == s]
   
-  return (m)
-}
+  if (!use_saved_fit | !file.exists(p$params_path) | !file.exists(p$test_path)) {
+    result <- fit_model_cv(subset = s)
+    fwrite(result$params, p$params_path)
+    fwrite(result$test,   p$test_path)
+    result
+  } else {
+    list(
+      params = fread(p$params_path),
+      test   = fread(p$test_path)
+    )
+  }
+})
 
-lm_fit <- fit_by_window[, .(lm_tau = list(fit_lm(geom_mean, tau)),
-                                   lm_d = list(fit_lm(geom_mean, d)),
-                                   lm_h = list(fit_lm(geom_mean, h, log_param = TRUE))), 
-                               by = .(subset, sub_label)]
+names(fit_results) <- subsets
+
+# Aggregated versions for convenience
+fits_params <- rbindlist(lapply(fit_results, `[[`, "params"))
+fits_test   <- rbindlist(lapply(fit_results, `[[`, "test"), fill = TRUE)
+
+# --- Common evaluation set ---
+# Exclude sequences that could not be predicted by ANY variant (fold x window x subset),
+# and apply this exclusion uniformly across all variants
+missing_ids <- fits_test[is.na(tau), unique(id)]
+fits_test   <- fits_test[!id %in% missing_ids]
+
+message(sprintf(
+  "Excluded %d sequences (%.1f%%) with no fitted parameters in at least one variant/fold/window",
+  length(missing_ids),
+  100 * length(missing_ids) / d_last[, uniqueN(id)]
+))
 ```
 
-## Fitted parameters
+    ## Excluded 3650 sequences (14.1%) with no fitted parameters in at least one variant/fold/window
 
-### Regular fit
+# Fitted parameters
+
+## Regular fit
 
 Here we fit all learners and amounts of practice together. Red points
 show the median fitted parameter value in each time bin.
 
 ``` r
-fit_all_avg <- fit_all[,  .(tau = median(tau), d = median(d), h = median(h)),  by = .(n_windows, window_type, window, geom_mean)]
+fit_all_avg <- fits_params[,  .(tau = median(tau), d = median(d), h = median(h)),  by = .(n_windows, window_type, window, geom_mean)]
 
-p_tau_all <- ggplot(fit_all, aes(x = geom_mean/60, y = tau)) +
+p_tau_all <- ggplot(fits_params, aes(x = geom_mean/60, y = tau)) +
   facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
   geom_point(alpha = .01) +
   geom_smooth(data = fit_all_avg, method = "lm", se = FALSE, formula = y ~ x) +
   geom_point(data = fit_all_avg, colour = "red") +
   plot_timescales() +
+  coord_cartesian(ylim = c(-10, 0)) +
   labs(x = "Between-session interval (min)", y = "Fitted parameter", title = "Retrieval threshold tau")
+```
 
+    ## Coordinate system already present.
+    ## ℹ Adding new coordinate system, which will replace the existing one.
+
+``` r
 ggsave(here("output", "tau_fit_all.png"), p_tau_all, width = 10, height = 6)
 ```
 
 ![](../output/tau_fit_all.png)
 
 ``` r
-p_d_all <- ggplot(fit_all, aes(x = geom_mean/60, y = d)) +
+p_d_all <- ggplot(fits_params, aes(x = geom_mean/60, y = d)) +
   facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
   geom_point(alpha = .01) +
   geom_smooth(data = fit_all_avg, method = "lm", se = FALSE, formula = y ~ x) +
@@ -447,7 +665,7 @@ ggsave(here("output", "d_fit_all.png"), p_d_all, width = 10, height = 6)
 ![](../output/d_fit_all.png)
 
 ``` r
-p_h_all <- ggplot(fit_all, aes(x = geom_mean/60, y = h)) +
+p_h_all <- ggplot(fits_params, aes(x = geom_mean/60, y = h)) +
   facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
   geom_point(alpha = .01) +
   geom_smooth(data = fit_all_avg, method = "lm", se = FALSE, formula = y ~ x) +
@@ -462,7 +680,7 @@ ggsave(here("output", "h_fit_all.png"), p_h_all, width = 10, height = 6)
 ![](../output/h_fit_all.png)
 
 ``` r
-p_h_filt_all <- ggplot(fit_all[h >= 1e-15], aes(x = geom_mean/60, y = h)) +
+p_h_filt_all <- ggplot(fits_params[h >= 1e-15], aes(x = geom_mean/60, y = h)) +
   facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
   geom_point(alpha = .01) +
   geom_smooth(data = fit_all_avg, method = "lm", se = FALSE, formula = y ~ x) +
@@ -474,9 +692,8 @@ p_h_filt_all <- ggplot(fit_all[h >= 1e-15], aes(x = geom_mean/60, y = h)) +
 ggsave(here("output", "h_fit_all_filtered.png"), p_h_filt_all, width = 10, height = 6)
 ```
 
-![](../output/h_fit_all_filtered.png)
-
-Create a pretty version of the 20-bin parameter plots.
+![](../output/h_fit_all_filtered.png) Create a pretty version of the
+20-bin parameter plots.
 
 ``` r
 plot_parameter <- function(d_parameter,
@@ -615,424 +832,257 @@ p_h_time <- plot_parameter(d_parameter = fit_h_avg[window_type == "regular"],
 
     ## Scale for x is already present.
     ## Adding another scale for x, which will replace the existing scale.
-    ## Coordinate system already present. Adding new coordinate system, which will replace the existing one.
+    ## Coordinate system already present.
+    ## ℹ Adding new coordinate system, which will replace the existing one.
 
-### Fit by learner
+# Predict test set data
 
-The following plot show the parameters that were fitted per learner
-(specifically: the lines are linear models fitted to the binwise
-parameter estimates shown as points). It is clear that nearly all
-learners exhibit the pattern that is also found at the group-level: as
-the between-session interval increases, tau/d/h decreases. In addition,
-there seem to be individual differences in both intercept and slope,
-which could indicate that a learner-specific fit could produce better
-results than a group-level fit.
+Use the fitted parameters to predict recall on the held-out folds.
 
 ``` r
-fit_by_learner_avg <- fit_by_learner[,  .(.N, tau = mean(tau), d = mean(d), h = mean(h)),  by = .(n_windows, window_type, window, geom_mean, sub_label)]
-
-p_tau_learner <- ggplot(fit_by_learner_avg, aes(x = geom_mean/60, y = tau, colour = sub_label)) +
-  facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
-  geom_point(alpha = .01) +
-  geom_smooth(method = "lm", se = FALSE, formula = y ~ x, linewidth = .1) +
-  plot_timescales() +
-  scale_y_continuous(limits = c(-7, 0)) +
-  guides(colour = "none") +
-  labs(x = "Between-session interval (min)", y = "Fitted parameter", title = "Retrieval threshold tau by learner")
-
-ggsave(here("output", "tau_fit_by_learner.png"), p_tau_learner, width = 10, height = 6)
-```
-
-    ## Warning: Removed 3 rows containing non-finite outside the scale range
-    ## (`stat_smooth()`).
-
-    ## Warning: Removed 3 rows containing missing values or values outside the scale
-    ## range (`geom_point()`).
-
-![](../output/tau_fit_by_learner.png)
-
-``` r
-p_d_learner <- ggplot(fit_by_learner_avg, aes(x = geom_mean/60, y = d, colour = sub_label)) +
-  facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
-  geom_point(alpha = .01) +
-  geom_smooth(method = "lm", se = FALSE, formula = y ~ x, linewidth = .1) +
-  plot_timescales() +
-  guides(colour = "none") +
-  labs(x = "Between-session interval (min)", y = "Fitted parameter", title = "Decay d by learner")
-
-ggsave(here("output", "d_fit_by_learner.png"), p_d_learner, width = 10, height = 6)
-```
-
-![](../output/d_fit_by_learner.png)
-
-``` r
-p_h_learner <- ggplot(fit_by_learner_avg, aes(x = geom_mean/60, y = h, colour = sub_label)) +
-  facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
-  geom_point(alpha = .01) +
-  geom_smooth(method = "lm", se = FALSE, formula = y ~ x, linewidth = .1) +
-  plot_timescales() +
-  scale_y_log10() +
-  guides(colour = "none") +
-  labs(x = "Between-session interval (min)", y = "Fitted parameter", title = "Scaling factor h by learner")
-
-ggsave(here("output", "h_fit_by_learner.png"), p_h_learner, width = 10, height = 6)
-```
-
-![](../output/h_fit_by_learner.png)
-
-The plots below show the coefficients from the fitted linear models per
-learner. Here we also see that most learners are clustered around
-similar values.
-
-``` r
-tau_by_learner_lm <- lm_fit[subset == "by_learner", .(map_dfr(lm_tau, function (m) {
-  list(intercept = coef(m)[[1]],
-       slope = coef(m)[[2]])
-}))]
-
-p_tau_learner_lm <- ggplot(tau_by_learner_lm, aes(x = intercept, y = slope)) +
-  geom_point(alpha = .25) +
-  labs(x = "Intercept", y = "Slope", title = "Retrieval threshold tau by learner")
-
-d_by_learner_lm <- lm_fit[subset == "by_learner", .(map_dfr(lm_d, function (m) {
-  list(intercept = coef(m)[[1]],
-       slope = coef(m)[[2]])
-}))]
-
-p_d_learner_lm <- ggplot(d_by_learner_lm, aes(x = intercept, y = slope)) +
-  geom_point(alpha = .25) +
-  labs(x = "Intercept", y = "Slope", title = "Decay d by learner")
-
-
-h_by_learner_lm <- lm_fit[subset == "by_learner", .(map_dfr(lm_h, function (m) {
-  list(intercept = coef(m)[[1]],
-       slope = coef(m)[[2]])
-}))]
-
-p_h_learner_lm <- ggplot(h_by_learner_lm, aes(x = intercept, y = slope)) +
-  geom_point(alpha = .25) +
-  labs(x = "Intercept", y = "Slope", title = "Scaling factor h by learner")
-
-ggsave(here("output", "tau_fit_by_learner_lm.png"), p_tau_learner_lm, width = 5, height = 4)
-```
-
-    ## Warning: Removed 27 rows containing missing values or values outside the scale
-    ## range (`geom_point()`).
-
-``` r
-ggsave(here("output", "d_fit_by_learner_lm.png"), p_d_learner_lm, width = 5, height = 4)
-```
-
-    ## Warning: Removed 27 rows containing missing values or values outside the scale
-    ## range (`geom_point()`).
-
-``` r
-ggsave(here("output", "h_fit_by_learner_lm.png"), p_h_learner_lm, width = 5, height = 4)
-```
-
-    ## Warning: Removed 27 rows containing missing values or values outside the scale
-    ## range (`geom_point()`).
-
-![](../output/tau_fit_by_learner_lm.png)
-![](../output/d_fit_by_learner_lm.png)
-![](../output/h_fit_by_learner_lm.png)
-
-### Fit by amount of practice
-
-The plots below show the fitted parameters by amount of practice.
-
-Notice that there seems to be a systematic effect of the amount of
-practice on the fitted model parameters: more practice in the first
-session corresponds to a higher retrieval threshold / (initial) decay /
-scaling factor. A logical explanation for this could be that the amount
-of practice is correlated with item difficulty: for instance more
-difficult items are selected more frequently by the adaptive learning
-system, and the extra practice of these items leads to higher predicted
-activation in session 2 (because of additional traces), but their
-difficulty means that accuracy is not actually higher, which means that
-a stronger decay is necessary to bridge the gap.
-
-``` r
-fit_by_practice_avg <- fit_by_practice[,  .(.N, tau = mean(tau), d = mean(d), h = mean(h)),  by = .(n_windows, window_type, window, geom_mean, sub_label)]
-
-p_tau_practice <- ggplot(fit_by_practice_avg, aes(x = geom_mean/60, y = tau, colour = sub_label)) +
-  facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
-  geom_point(alpha = .01) +
-  geom_smooth(method = "lm", se = FALSE, formula = y ~ x, linewidth = .1) +
-  plot_timescales() +
-  scale_y_continuous(limits = c(-7, 0)) +
-  scale_colour_viridis_d() +
-  labs(x = "Between-session interval (min)", y = "Fitted parameter", colour = "Trials", title = "Retrieval threshold tau by practice")
-
-ggsave(here("output", "tau_fit_by_practice.png"), p_tau_practice, width = 10, height = 6)
-```
-
-![](../output/tau_fit_by_practice.png)
-
-``` r
-p_d_practice <- ggplot(fit_by_practice_avg, aes(x = geom_mean/60, y = d, colour = sub_label)) +
-  facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
-  geom_point(alpha = .01) +
-  geom_smooth(method = "lm", se = FALSE, formula = y ~ x, linewidth = .1) +
-  plot_timescales() +
-  scale_colour_viridis_d() +
-  labs(x = "Between-session interval (min)", y = "Fitted parameter", colour = "Trials", title = "Decay d by practice")
-
-ggsave(here("output", "d_fit_by_practice.png"), p_d_practice, width = 10, height = 6)
-```
-
-![](../output/d_fit_by_practice.png)
-
-``` r
-p_h_practice <- ggplot(fit_by_practice_avg, aes(x = geom_mean/60, y = h, colour = sub_label)) +
-  facet_wrap(~ paste0(n_windows, " window(s) (", window_type, ")")) +
-  geom_point(alpha = .01) +
-  geom_smooth(method = "lm", se = FALSE, formula = y ~ x, linewidth = .1) +
-  plot_timescales() +
-  scale_y_log10() +
-  scale_colour_viridis_d() +
-  labs(x = "Between-session interval (min)", y = "Fitted parameter", colour = "Trials", title = "Scaling factor h by practice")
-
-ggsave(here("output", "h_fit_by_practice.png"), p_h_practice, width = 10, height = 6)
-```
-
-![](../output/h_fit_by_practice.png)
-
-The plots below show the coefficients from the fitted linear models per
-amount of practice.
-
-``` r
-tau_by_practice_lm <- lm_fit[subset == "by_practice", .(map_dfr(lm_tau, function (m) {
-  list(intercept = coef(m)[[1]],
-       slope = coef(m)[[2]])
-}))]
-
-p_tau_practice_lm <- ggplot(tau_by_practice_lm, aes(x = intercept, y = slope)) +
-  geom_point(alpha = .25) +
-  labs(x = "Intercept", y = "Slope", title = "Retrieval threshold tau by practice")
-
-d_by_practice_lm <- lm_fit[subset == "by_practice", .(map_dfr(lm_d, function (m) {
-  list(intercept = coef(m)[[1]],
-       slope = coef(m)[[2]])
-}))]
-
-p_d_practice_lm <- ggplot(d_by_practice_lm, aes(x = intercept, y = slope)) +
-  geom_point(alpha = .25) +
-  labs(x = "Intercept", y = "Slope", title = "Decay d by practice")
-
-
-h_by_practice_lm <- lm_fit[subset == "by_practice", .(map_dfr(lm_h, function (m) {
-  list(intercept = coef(m)[[1]],
-       slope = coef(m)[[2]])
-}))]
-
-p_h_practice_lm <- ggplot(h_by_practice_lm, aes(x = intercept, y = slope)) +
-  geom_point(alpha = .25) +
-  labs(x = "Intercept", y = "Slope", title = "Scaling factor h by practice")
-
-
-ggsave(here("output", "tau_fit_by_practice_lm.png"), p_tau_practice_lm, width = 5, height = 4)
-ggsave(here("output", "d_fit_by_practice_lm.png"), p_d_practice_lm, width = 5, height = 4)
-ggsave(here("output", "h_fit_by_practice_lm.png"), p_h_practice_lm, width = 5, height = 4)
-```
-
-![](../output/tau_fit_by_practice_lm.png)
-![](../output/d_fit_by_practice_lm.png)
-![](../output/h_fit_by_practice_lm.png)
-
-# Evaluate models
-
-## Predict recall
-
-Define the function to predict recall from fitted parameters:
-
-``` r
-predict_recall <- function (model_fit) {
+predict_recall_cv <- function(fits_test, fits_params) {
   
-  d_fit <- switch(model_fit[1, subset],
-                  "all" = list(copy(d_last)),
-                  "by_learner" = copy(d_last_by_learner),
-                  "by_practice" = copy(d_last_by_practice))
+  # Split test set by fold x window x subset
+  test_by_fold_window <- split(fits_test, by = c("fold", "window_id", "subset"))
   
-  fit_by_window <- split(model_fit, by = "window_id")
-  
-  future_map(fit_by_window, function (fit_window) {
+  future_map(test_by_fold_window, function(d_test_fw) {
     
-    extrapolate_outside_fitted_window <- fit_window[1, subset == "all" && window_type %in% c("short", "24h")]
+    current_fold <- d_test_fw[1, fold]
+    current_window_id <- d_test_fw[1, window_id]
+    current_subset <- d_test_fw[1, subset]
     
-    if (extrapolate_outside_fitted_window) {
-      # In these cases, apply the parameters outside the fitted window
-      d_window <- d_fit[[1]]
-      d_window[, window := 1]
-      d_window[, sequence := 1:.N]
-      d_window <- d_f[d_window[, .(id, sequence, window)], on = "id"]
-      
-    } else {
-      # Otherwise, use fitted parameters only in their own window
-      fit_window[, sequence := 1:.N]
-      d_window <- d_f[fit_window[, .(id, sequence, window)], on = "id"]
-    }
+    # Get aggregated fitted params for this fold x window
+    # (one row per sub_label, or one row total for "all")
+    fit_window <- fits_params[subset == current_subset & fold == current_fold & window_id == current_window_id] 
     
+    if (nrow(fit_window) == 0) return(NULL)
+    
+    extrapolate <- fit_window[1, window_type %in% c("short", "24h")]
+    
+    # --- Build sequence list for test observations ---
+    d_window <- copy(d_test_fw)
+    d_window[, sequence := 1:.N]
+    if (extrapolate) d_window[, window := 1L]
+    d_window <- d_f[d_window[, .(id, sequence, window)], on = "id"]
     d_window_seqs <- generate_seq_list(d_window)
+    
+    # --- Look up fitted parameters per test sequence ---
+    if (current_subset == "all") {
+      # Single parameter set for all sequences in this fold x window
+      fitted_tau <- fit_window[1, tau]
+      fitted_d <- fit_window[1, d]
+      fitted_h <- fit_window[1, h]
+    } else {
+      # One parameter set per sub_label; match by sub_label of each test sequence
+      fitted_tau <- fit_window[match(d_test_fw$sub_label, fit_window$sub_label), tau]
+      fitted_d <- fit_window[match(d_test_fw$sub_label, fit_window$sub_label), d]
+      fitted_h <- fit_window[match(d_test_fw$sub_label, fit_window$sub_label), h]
+    }
     
     correct <- map_int(d_window_seqs, ~.$correct)
     time_between <- map_dbl(d_window_seqs, ~.$time_between)
+    seq_ids <- map_chr(d_window_seqs, ~.$id)
     
-    if (extrapolate_outside_fitted_window) {
-        fitted_tau <- fit_window[1, tau]
-        fitted_d <- fit_window[, median(d)]
-        fitted_h <- fit_window[, median(h)]
-    } else {
-        fitted_tau <- fit_window$tau
-        fitted_d <- fit_window$d
-        fitted_h <- fit_window$h
-    }
+    # --- Generate predictions from each fitted parameter ---
     
-    # Prediction from fitted tau
-    ac <- map_dbl(d_window_seqs, function (x) {
+    # Prediction from fitted tau (d and h fixed at defaults)
+    ac_tau <- map_dbl(d_window_seqs, function(x) {
       activation(x$time_within, x$time_between, model_params$h, model_params$decay)
     })
-    p_recall_tau <- p_recall(ac, fitted_tau, model_params$s)
+    p_recall_tau <- p_recall(ac_tau, fitted_tau, model_params$s)
     
-    # Prediction from fitted d
-    ac_d <- map2_dbl(d_window_seqs, fitted_d, function (x, d) {
+    # Prediction from fitted d (tau and h fixed at defaults)
+    ac_d <- map2_dbl(d_window_seqs, fitted_d, function(x, d) {
       activation(x$time_within, x$time_between, model_params$h, d)
     })
     p_recall_d <- p_recall(ac_d, model_params$tau, model_params$s)
     
-    # Prediction from fitted h
-    ac_h <- map2_dbl(d_window_seqs, fitted_h, function (x, h) {
+    # Prediction from fitted h (tau and d fixed at defaults)
+    ac_h <- map2_dbl(d_window_seqs, fitted_h, function(x, h) {
       activation(x$time_within, x$time_between, h, model_params$decay)
     })
     p_recall_h <- p_recall(ac_h, model_params$tau, model_params$s)
     
-    fit_info <- fit_window[, .(subset, sub_label, window_id, n_windows, window, geom_mean, window_type, id)]
+    # --- Assemble output ---
+    # Join window-level fit info onto per-sequence predictions by sub_label
+    predictions <- data.table(
+      id           = seq_ids,
+      sub_label    = d_test_fw$sub_label,
+      fold         = current_fold,
+      time_between = time_between,
+      correct      = correct,
+      p_recall_tau = p_recall_tau,
+      p_recall_d   = p_recall_d,
+      p_recall_h   = p_recall_h
+    )
     
-    if (extrapolate_outside_fitted_window) {
-      fit_info[, id := NULL]
-      fit_info <- cbind(fit_info[1], data.table(id = map_chr(d_window_seqs, ~.$id)))
-    }
+    # Add window metadata (one row per sub_label in fit_window)
+    window_meta <- fit_window[, .(subset, sub_label, window_id, n_windows, window, geom_mean, window_type)]
+    predictions <- window_meta[predictions, on = .(sub_label)]
     
-    data.table(fit_info,
-               time_between = time_between,
-               correct = correct,
-               p_recall_tau = p_recall_tau,
-               p_recall_d = p_recall_d,
-               p_recall_h = p_recall_h)
-  }) |>
+    predictions
+    
+  }, .progress = FALSE) |>
+    discard(is.null) |>
     rbindlist()
 }
 ```
 
-Predict recall for all fitted models (note: this can take a while!).
-(Set `use_saved_predictions` to TRUE to try to load previous predictions
-from file.)
+Make predictions for all folds and variants of the model, and save to
+file. (Set `use_saved_predictions` to TRUE to try to load previous
+predictions from file.)
 
 ``` r
 use_saved_predictions <- TRUE
 
-pred_all_path <- here("data", "pred_all.csv")
-pred_by_learner_path <- here("data", "pred_by_learner.csv")
-pred_by_practice_path <- here("data", "pred_by_practice.csv")
+subsets <- c("all", "by_learner", "by_practice")
 
-if (!use_saved_predictions | !file.exists(pred_all_path)) {
-  pred_all <- predict_recall(fit_all)
-  fwrite(pred_all, pred_all_path)
-} else {
-  pred_all <- fread(pred_all_path)
-}
+pred_paths <- rbindlist(lapply(subsets, function(s) {
+  data.table(
+    subset    = s,
+    pred_path = here("data", paste0("pred_cv_", s, ".csv"))
+  )
+}))
 
-if (!use_saved_predictions | !file.exists(pred_by_learner_path)) {
-  pred_by_learner <- predict_recall(fit_by_learner)
-  fwrite(pred_by_learner, pred_by_learner_path)
-} else {
-  pred_by_learner <- fread(pred_by_learner_path)
-}
-
-if (!use_saved_predictions | !file.exists(pred_by_practice_path)) {
-  pred_by_practice <- predict_recall(fit_by_practice)
-  fwrite(pred_by_practice, pred_by_practice_path)
-} else {
-  pred_by_practice <- fread(pred_by_practice_path)
-}
-
-preds <- rbind(pred_all, pred_by_learner, pred_by_practice)
+preds_cv <- rbindlist(lapply(subsets, function(s) {
+  p <- pred_paths[subset == s]
+  
+  if (!use_saved_predictions | !file.exists(p$pred_path)) {
+    pred <- predict_recall_cv(
+      fits_test   = fits_test[subset == s],
+      fits_params = fits_params[subset == s]
+    )
+    fwrite(pred, p$pred_path)
+    pred
+  } else {
+    fread(p$pred_path)
+  }
+}))
 ```
 
-Also predict recall using the parametric function:
+Evaluate the predictions on the hold-out fold by computing the
+log-likelihood of the observed data under the predicted probabilities.
 
 ``` r
-# Predict recall using the linear model
-predict_lm <- function (subset, sub_label, lm_tau, lm_d, lm_h) {
+compute_cv_ll <- function(preds_cv, epsilon = 1e-6) {
   
-  d_pred <- d_last[, .(id, user, trials, time_between, correct)]
-  if (subset == "by_learner") {
-    d_pred <- d_pred[user == sub_label]
-  } else if (subset == "by_practice") {
-    d_pred <- d_pred[trials == sub_label]
-  }
+  # Clip predictions to [epsilon, 1 - epsilon] to avoid log(0)
+  preds_cv[, p_recall_tau := pmax(epsilon, pmin(1 - epsilon, p_recall_tau))]
+  preds_cv[, p_recall_d   := pmax(epsilon, pmin(1 - epsilon, p_recall_d))]
+  preds_cv[, p_recall_h   := pmax(epsilon, pmin(1 - epsilon, p_recall_h))]
   
-  # Get model parameters per sequence
-  tau_fit <- predict(lm_tau, newdata = d_pred[, .(geom_mean = time_between)])
-  d_fit <- predict(lm_d, newdata = d_pred[, .(geom_mean = time_between)])
-  h_fit <- predict(lm_h, newdata = d_pred[, .(geom_mean = time_between)]) |> exp()
+  # Compute per-observation log-likelihood for each parameter
+  preds_cv[, ll_tau := correct * log(p_recall_tau) + (1 - correct) * log(1 - p_recall_tau)]
+  preds_cv[, ll_d   := correct * log(p_recall_d)   + (1 - correct) * log(1 - p_recall_d)]
+  preds_cv[, ll_h   := correct * log(p_recall_h)   + (1 - correct) * log(1 - p_recall_h)]
   
-  params_fit <- cbind(d_pred[, .(id)], tau_fit, d_fit, h_fit)
+  # Summed CV log-likelihood per configuration and fold
+  ll_per_fold <- preds_cv[, .(
+    ll_tau = sum(ll_tau, na.rm = TRUE),
+    ll_d   = sum(ll_d,   na.rm = TRUE),
+    ll_h   = sum(ll_h,   na.rm = TRUE),
+    n      = .N
+  ), by = .(subset, window_type, n_windows, fold)]
   
-  # Prepare sequences
-  d_pred[, sequence := 1:.N]
-  d_pred[, window := 0]
-  d_pred_full <- d_f[d_pred[, .(id, sequence, window)], on = .(id)]
-  d_pred_seqs <- generate_seq_list(d_pred_full)
+  # Summed CV log-likelihood per configuration (across all folds)
+  ll_total <- preds_cv[, .(
+    ll_tau = sum(ll_tau, na.rm = TRUE),
+    ll_d   = sum(ll_d,   na.rm = TRUE),
+    ll_h   = sum(ll_h,   na.rm = TRUE),
+    n      = .N
+  ), by = .(subset, window_type, n_windows)]
   
-  # tau
-  ac_tau <- map_dbl(d_pred_seqs, function (x) {
-    activation(x$time_within, x$time_between, model_params$h, model_params$decay)
-  })
-  p_recall_tau <- p_recall(ac_tau, params_fit$tau_fit, model_params$s)
-
-  # d
-  ac_d <- map2_dbl(d_pred_seqs, params_fit$d_fit, function (x, d_x) {
-    activation(x$time_within, x$time_between, model_params$h, d_x)
-  })
-  p_recall_d <- p_recall(ac_d, model_params$tau, model_params$s)
-  
-  # h
-  ac_h <- map2_dbl(d_pred_seqs, params_fit$h_fit, function (x, h_x) {
-    activation(x$time_within, x$time_between, h_x, model_params$decay)
-  })
-  p_recall_h <- p_recall(ac_h, model_params$tau, model_params$s)
-  
-  return (data.table(subset = subset,
-                     sub_label = sub_label,
-                     window_id = 0,
-                     n_windows = 20,
-                     window = 0,
-                     geom_mean = NA,
-                     window_type = "lm",
-                     id = d_pred$id,
-                     time_between = d_pred$time_between,
-                     correct = d_pred$correct,
-                     p_recall_tau = p_recall_tau,
-                     p_recall_d = p_recall_d,
-                     p_recall_h = p_recall_h))
-  
+  list(
+    per_fold = ll_per_fold,
+    total    = ll_total
+  )
 }
 
+cv_ll <- compute_cv_ll(copy(preds_cv))
+```
 
-pred_lm_path <- here("data", "pred_lm.csv")
+## Model comparison
 
-if (!use_saved_predictions | !file.exists(pred_lm_path)) {
-  pred_lm <- future_map(seq_len(nrow(lm_fit)), function (x) {
-    lm_fit[x, predict_lm(subset, sub_label, lm_tau[[1]], lm_d[[1]], lm_h[[1]])]
-  }) |>
-    rbindlist()
-  fwrite(pred_lm, pred_lm_path)
-} else {
-  pred_lm <- fread(pred_lm_path)
-}
+``` r
+# --- Reshape to long format ---
+ll_long <- melt(
+  cv_ll$total,
+  id.vars      = c("subset", "window_type", "n_windows", "n"),
+  measure.vars = c("ll_tau", "ll_d", "ll_h"),
+  variable.name = "parameter",
+  value.name    = "ll"
+)
 
-preds <- rbind(preds, pred_lm)
+# Clean up labels
+ll_long[, parameter := factor(parameter,
+  levels = c("ll_tau", "ll_d", "ll_h"),
+  labels = c("tau", "d", "h")
+)]
+
+ll_long[, subset := factor(subset,
+  levels = c("all", "by_learner", "by_practice"),
+  labels = c("All data", "By learner", "By practice")
+)]
+
+ll_long[, window_type := factor(window_type,
+  levels = c("regular", "short", "24h"),
+  labels = c("Regular", "Short (0–10 min)", "24h")
+)]
+
+ll_long[, config := factor(
+  ifelse(window_type == "Regular", as.character(n_windows), as.character(window_type)),
+  levels = c("1", "2", "5", "10", "20", "Short (0–10 min)", "24h")
+)]
+
+ll_best <- ll_long[window_type == "Regular", .SD[which.max(ll)], by = .(window_type, parameter, subset)]
+
+# --- Shared theme ---
+theme_cv <- theme_bw(base_size = 14) +
+  theme(plot.margin = margin(7, 14, 7, 7),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.text.x = element_text(margin = margin(t = 8)),
+          axis.text.x.top = element_text(margin = margin(b = 8)))
+
+colour_scale <- scale_colour_manual(
+  values = c("tau" = "#E69F00", "d" = "#0072B2", "h" = "#009E73"),
+  labels = c("tau" = expression(tau), "d" = "d", "h" = "h"),
+  name   = "Parameter"
+  # guide  = guide_legend(override.aes = list(linetype = 0, shape = 16))
+)
+
+# --- Plot 1: regular windows ---
+p_ll_regular <- ggplot(
+  ll_long[window_type == "Regular"],
+  aes(x = config, y = ll, colour = parameter, group = parameter)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(data = ll_best, size = 5, shape = 1, show.legend = FALSE) +
+  geom_point(size = 2.5) +
+  facet_wrap(~subset, ncol = 3) +
+  colour_scale +
+  labs(
+    x     = "Number of between-session interval bins",
+    y     = "Held-out log-likelihood"
+  ) +
+  theme_cv
+
+# --- Plot 2: extrapolation windows ---
+p_ll_extrap <- ggplot(
+  ll_long[window_type != "Regular"],
+  aes(x = config, y = ll, colour = parameter, group = parameter)
+) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  facet_wrap(~subset, ncol = 3) +
+  colour_scale +
+  scale_x_discrete(labels = c("Short (0–10 min)" = "Short\n(0–10 min)", "24h" = "24h")) +
+  labs(
+    x     = "Between-session interval",
+    y     = "Held-out log-likelihood"
+  ) +
+  theme_cv
 ```
 
 ## Visualise fit
@@ -1078,8 +1128,10 @@ plot_comparison <- function (d_model,
                 colour = pred_col, fill = pred_col, lty = 1, lwd = .75) +
     # Labels
     annotate("text", x = label_pos$data$x, y = label_pos$data$y,
+             size = 4.05,
              label = "Data", colour = obs_col) +
     annotate("text", x = label_pos$model$x, y = label_pos$model$y,
+             size = 4.05,
              label = "Model", colour = pred_col) +
     # Plot setup
     scale_x_log10(
@@ -1117,7 +1169,7 @@ plot_comparison <- function (d_model,
 Tau fitted to various window splits:
 
 ``` r
-pred_tau <- copy(preds)
+pred_tau <- copy(preds_cv)
 setnames(pred_tau, "p_recall_tau", "pred_correct")
 
 p_tau_windows <- map(n_windows, function (n_w) {
@@ -1126,17 +1178,16 @@ p_tau_windows <- map(n_windows, function (n_w) {
                        window_range = window_range[n_windows == n_w & window_type == "regular"],
                        n_w = n_w, 
                        label_pos = list(data = list(x = 35000, y = .5), 
-                                        model = list(x = 20000, y = .35)))
+                                        model = list(x = 20000, y = .325)))
   return (p)
 })
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-6-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-6-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-6-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-6-4.png)<!-- -->
-
+![](03_fit_models_files/figure-gfm/unnamed-chunk-17-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-17-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-17-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-17-4.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-17-5.png)<!-- -->
 Decay fitted to various window splits:
 
 ``` r
-pred_d <- copy(preds)
+pred_d <- copy(preds_cv)
 setnames(pred_d, "p_recall_d", "pred_correct")
 
 p_d_windows <- map(n_windows, function (n_w) {
@@ -1144,17 +1195,17 @@ p_d_windows <- map(n_windows, function (n_w) {
                        d_last = pred_d[subset == "all" & n_windows == n_w & window_type == "regular"],
                        window_range = window_range[n_windows == n_w & window_type == "regular"],
                        n_w = n_w, 
-                       label_pos = list(data = list(x = 35000, y = .5), 
-                                        model = list(x = 20000, y = .35)))
+                       label_pos = list(data = list(x = 20000, y = .35), 
+                                        model = list(x = 35000, y = .55)))
   return (p)
 })
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-7-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-7-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-7-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-7-4.png)<!-- -->
+![](03_fit_models_files/figure-gfm/unnamed-chunk-18-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-18-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-18-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-18-4.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-18-5.png)<!-- -->
 Scaling factor fitted to various window splits:
 
 ``` r
-pred_h <- copy(preds)
+pred_h <- copy(preds_cv)
 setnames(pred_h, "p_recall_h", "pred_correct")
 
 p_h_windows <- map(n_windows, function (n_w) {
@@ -1162,13 +1213,13 @@ p_h_windows <- map(n_windows, function (n_w) {
                        d_last = pred_h[subset == "all" & n_windows == n_w & window_type == "regular"],
                        window_range = window_range[n_windows == n_w & window_type == "regular"],
                        n_w = n_w, 
-                       label_pos = list(data = list(x = 35000, y = .5), 
-                                        model = list(x = 20000, y = .35)))
+                       label_pos = list(data = list(x = 20000, y = .35), 
+                                        model = list(x = 35000, y = .55)))
   return (p)
 })
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-8-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-8-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-8-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-8-4.png)<!-- -->
+![](03_fit_models_files/figure-gfm/unnamed-chunk-19-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-19-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-19-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-19-4.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-19-5.png)<!-- -->
 \#### Short intervals
 
 Tau fitted to short intervals:
@@ -1183,11 +1234,12 @@ p_tau_short <- plot_comparison(d_model = pred_tau[subset == "all" & window_type 
                                print_plot = FALSE) +
   geom_rect(aes(xmin  = window_range[window_type == "short", start/60], xmax = window_range[window_type == "short", end/60], ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
-p_tau_short
+ggsave(here("output", "tau_fit_short.png"), p_tau_short, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-9-1.png)<!-- --> Decay
-fitted to short intervals:
+![](../output/tau_fit_short.png)
+
+Decay fitted to short intervals:
 
 ``` r
 p_d_short <- plot_comparison(d_model = pred_d[subset == "all" & window_type == "short"], 
@@ -1199,10 +1251,10 @@ p_d_short <- plot_comparison(d_model = pred_d[subset == "all" & window_type == "
                              print_plot = FALSE) +
   geom_rect(aes(xmin  = window_range[window_type == "short", start/60], xmax = window_range[window_type == "short", end/60], ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
-p_d_short
+ggsave(here("output", "d_fit_short.png"), p_d_short, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-10-1.png)<!-- -->
+![](../output/d_fit_short.png)
 
 Scaling factor fitted to short intervals:
 
@@ -1216,10 +1268,10 @@ p_h_short <- plot_comparison(d_model = pred_h[subset == "all" & window_type == "
                              print_plot = FALSE) +
   geom_rect(aes(xmin  = window_range[window_type == "short", start/60], xmax = window_range[window_type == "short", end/60], ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
-p_h_short
+ggsave(here("output", "h_fit_short.png"), p_h_short, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-11-1.png)<!-- -->
+![](../output/h_fit_short.png)
 
 #### 24h intervals
 
@@ -1235,10 +1287,10 @@ p_tau_24h <- plot_comparison(d_model = pred_tau[subset == "all" & window_type ==
                              print_plot = FALSE) +
   geom_rect(aes(xmin  = window_range[window_type == "24h", start/60], xmax = window_range[window_type == "24h", end/60], ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
-p_tau_24h
+ggsave(here("output", "tau_fit_24h.png"), p_tau_24h, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-12-1.png)<!-- -->
+![](../output/tau_fit_24h.png)
 
 Decay fitted to 24 h:
 
@@ -1252,10 +1304,10 @@ p_d_24h <- plot_comparison(d_model = pred_d[subset == "all" & window_type == "24
                            print_plot = FALSE) +
   geom_rect(aes(xmin  = window_range[window_type == "24h", start/60], xmax = window_range[window_type == "24h", end/60], ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
-p_d_24h
+ggsave(here("output", "d_fit_24h.png"), p_d_24h, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-13-1.png)<!-- -->
+![](../output/d_fit_24h.png)
 
 Scaling factor fitted to 24 h:
 
@@ -1269,51 +1321,10 @@ p_h_24h <- plot_comparison(d_model = pred_h[subset == "all" & window_type == "24
                            print_plot = FALSE) +
   geom_rect(aes(xmin  = window_range[window_type == "24h", start/60], xmax = window_range[window_type == "24h", end/60], ymin = -0.05, ymax = 1.05), fill = section_col, alpha = .25)
 
-p_h_24h
+ggsave(here("output", "h_fit_24h.png"), p_h_24h, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-14-1.png)<!-- -->
-
-#### Parametric fit
-
-Tau fitted using the parametric function (tau(t)):
-
-``` r
-p_tau_lm <- plot_comparison(d_model = pred_tau[subset == "all" & window_type == "lm"], 
-                            d_last = pred_tau[subset == "all" & window_type == "lm"], 
-                            window_range = window_range[n_windows == 20 & window_type == "regular"], 
-                            n_w = 20, 
-                            label_pos = list(data = list(x = 35000, y = .5), 
-                                             model = list(x = 5000, y = .7)))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-15-1.png)<!-- -->
-
-Decay fitted using the parametric function (d(t)):
-
-``` r
-p_d_lm <- plot_comparison(d_model = pred_d[subset == "all" & window_type == "lm"], 
-                          d_last = pred_d[subset == "all" & window_type == "lm"], 
-                          window_range = window_range[n_windows == 20 & window_type == "regular"], 
-                          n_w = 20, 
-                          label_pos = list(data = list(x = 35000, y = .25), 
-                                           model = list(x = 20000, y = .6)))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-16-1.png)<!-- -->
-
-Scaling factor fitted using the parametric function (h(t)):
-
-``` r
-p_h_lm <- plot_comparison(d_model = pred_h[subset == "all" & window_type == "lm"], 
-                          d_last = pred_h[subset == "all" & window_type == "lm"], 
-                          window_range = window_range[n_windows == 20 & window_type == "regular"], 
-                          n_w = 20, 
-                          label_pos = list(data = list(x = 35000, y = .5), 
-                                           model = list(x = 20000, y = .35)))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-17-1.png)<!-- -->
+![](../output/h_fit_24h.png)
 
 ### Fit by learner
 
@@ -1325,12 +1336,12 @@ averages (dark); the black points the observed recall.
 ``` r
 set.seed(0)
 
-pred_20_learner <- copy(preds[subset == "by_learner" & n_windows == 20 & window_type == "regular"])
+pred_20_learner <- copy(preds_cv[subset == "by_learner" & n_windows == 20 & window_type == "regular"])
 pred_20_learner_avg <- pred_20_learner[, .(correct = mean(correct), p_recall_tau = mean(p_recall_tau), p_recall_d = mean(p_recall_d), p_recall_h = mean(p_recall_h)), by = .(sub_label, n_windows, window_type, window, geom_mean)]
 
 sample_learners <- sample(unique(pred_20_learner_avg$sub_label), 18, replace = FALSE)
 
-ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60, y = p_recall_tau, group = sub_label)) +
+p_tau_fit_by_learner_sample <- ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60, y = p_recall_tau, group = sub_label)) +
   facet_wrap(~ sub_label, ncol = 6) +
   geom_point(aes(y = correct), position = position_jitter(width = 0, height = .025), alpha = .1, colour = "black") +
   geom_point(alpha = .05, colour = "red") +
@@ -1338,14 +1349,19 @@ ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60,
   plot_timescales() +
   guides(colour = "none") +
   labs(x = "Between-session interval (min)", y = "Predicted recall", colour = "Learner")
+
+ggsave(here("output", "tau_fit_by_learner_sample.png"), p_tau_fit_by_learner_sample, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-18-1.png)<!-- -->
+    ## Ignoring unknown labels:
+    ## • colour : "Learner"
+
+![](../output/tau_fit_by_learner_sample.png)
 
 The same plot fot fitted decay:
 
 ``` r
-ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60, y = p_recall_d, group = sub_label)) +
+p_d_fit_by_learner_sample <- ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60, y = p_recall_d, group = sub_label)) +
   facet_wrap(~ sub_label, ncol = 6) +
   geom_point(aes(y = correct), position = position_jitter(width = 0, height = .025), alpha = .1, colour = "black") +
   geom_point(alpha = .05, colour = "red") +
@@ -1353,14 +1369,19 @@ ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60,
   plot_timescales() +
   guides(colour = "none") +
   labs(x = "Between-session interval (min)", y = "Predicted recall", colour = "Learner")
+
+ggsave(here("output", "d_fit_by_learner_sample.png"), p_d_fit_by_learner_sample, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-19-1.png)<!-- -->
+    ## Ignoring unknown labels:
+    ## • colour : "Learner"
+
+![](../output/d_fit_by_learner_sample.png)
 
 The same plot for fitted scaling factor h:
 
 ``` r
-ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60, y = p_recall_h, group = sub_label)) +
+p_h_fit_by_learner_sample <- ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60, y = p_recall_h, group = sub_label)) +
   facet_wrap(~ sub_label, ncol = 6) +
   geom_point(aes(y = correct), position = position_jitter(width = 0, height = .025), alpha = .1, colour = "black") +
   geom_point(alpha = .05, colour = "red") +
@@ -1368,399 +1389,130 @@ ggplot(pred_20_learner[sub_label %in% sample_learners], aes(x = time_between/60,
   plot_timescales() +
   guides(colour = "none") +
   labs(x = "Between-session interval (min)", y = "Predicted recall", colour = "Learner")
+
+ggsave(here("output", "h_fit_by_learner_sample.png"), p_h_fit_by_learner_sample, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-20-1.png)<!-- -->
+    ## Ignoring unknown labels:
+    ## • colour : "Learner"
+
+![](../output/h_fit_by_learner_sample.png)
 
 ### Fit by practice
 
 Fitted tau by amount of practice:
 
 ``` r
-pred_20_practice <- copy(preds[subset == "by_practice" & n_windows == 20 & window_type == "regular"])
+pred_20_practice <- copy(preds_cv[subset == "by_practice" & n_windows == 20 & window_type == "regular"])
 pred_20_practice_avg <- pred_20_practice[, .(correct = mean(correct), p_recall_tau = mean(p_recall_tau), p_recall_d = mean(p_recall_d), p_recall_h = mean(p_recall_h)), by = .(sub_label, n_windows, window_type, window, geom_mean)]
 
-ggplot(pred_20_practice_avg, aes(x = geom_mean/60, y = p_recall_tau, group = sub_label, colour = sub_label)) +
+p_tau_fit_by_practice <- ggplot(pred_20_practice_avg, aes(x = geom_mean/60, y = p_recall_tau, group = sub_label, colour = sub_label)) +
   facet_wrap(~ sub_label, ncol = 6) +
   geom_line() +
   geom_point(aes(colour = sub_label)) +
   plot_timescales() +
   labs(x = "Between-session interval (min)", y = "Predicted recall", colour = "Trials")
+
+ggsave(here("output", "tau_fit_by_practice.png"), p_tau_fit_by_practice, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-21-1.png)<!-- -->
+![](../output/tau_fit_by_practice.png)
 
 Fitted decay by amount of practice:
 
 ``` r
-ggplot(pred_20_practice_avg, aes(x = geom_mean/60, y = p_recall_d, group = sub_label, colour = sub_label)) +
+p_d_fit_by_practice <- ggplot(pred_20_practice_avg, aes(x = geom_mean/60, y = p_recall_d, group = sub_label, colour = sub_label)) +
   facet_wrap(~ sub_label, ncol = 6) +
   geom_line() +
   geom_point(aes(colour = sub_label)) +
   plot_timescales() +
   labs(x = "Between-session interval (min)", y = "Predicted recall", colour = "Trials")
+
+ggsave(here("output", "d_fit_by_practice.png"), p_d_fit_by_practice, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-22-1.png)<!-- -->
+![](../output/d_fit_by_practice.png)
 
 Fitted h by amount of practice:
 
 ``` r
-ggplot(pred_20_practice_avg, aes(x = geom_mean/60, y = p_recall_h, group = sub_label, colour = sub_label)) +
+p_h_fit_by_practice <- ggplot(pred_20_practice_avg, aes(x = geom_mean/60, y = p_recall_h, group = sub_label, colour = sub_label)) +
   facet_wrap(~ sub_label, ncol = 6) +
   geom_line() +
   geom_point(aes(colour = sub_label)) +
   plot_timescales() +
   labs(x = "Between-session interval (min)", y = "Predicted recall", colour = "Trials")
+
+ggsave(here("output", "h_fit_by_practice.png"), p_h_fit_by_practice, width = 6, height = 4)
 ```
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-23-1.png)<!-- -->
+![](../output/h_fit_by_practice.png)
 
 Were some amounts of prior practice more prevalent in certain windows?
 Not really, the distribution looks fairly similar across different
 amounts of practice (facets):
 
 ``` r
-ggplot(pred_20_practice, aes(x = window, fill = as.factor(window))) +
+p_practice_by_windows <- ggplot(pred_20_practice, aes(x = window, fill = as.factor(window))) +
   facet_wrap(~ sub_label, ncol = 6, scales = "free_y") +
   geom_histogram() +
   labs(x = "Between-session interval (window)", y = "Count", fill = "Window")
+
+ggsave(here("output", "practice_by_windows.png"), p_practice_by_windows, width = 6, height = 4)
 ```
 
-    ## `stat_bin()` using `bins = 30`. Pick better value with `binwidth`.
+    ## `stat_bin()` using `bins = 30`. Pick better value `binwidth`.
 
-![](03_fit_models_files/figure-gfm/unnamed-chunk-24-1.png)<!-- -->
-
-## Goodness of fit
-
-### Log-likelihood
-
-The log-likelihood provides a measure of the goodness of fit, with
-higher values being better. Since the various fitting methods lead to
-slightly differently sized subsets of the data, use the average
-log-likelihood (divided by the number of observations).
-
-``` r
-ll <- preds[, .(ll_tau = log_likelihood(correct, p_recall_tau, average = TRUE),
-                ll_d = log_likelihood(correct, p_recall_d, average = TRUE),
-                ll_h = log_likelihood(correct, p_recall_h, average = TRUE)), by = .(subset, n_windows, window_type)]
-
-ll[, fit_config := paste(subset, n_windows, window_type)]
-
-ll_long <- melt(ll, measure.vars = patterns("ll_*"), value.name = "ll")
-ll_long[, variable := gsub("ll_", "", variable, fixed = TRUE)]
-
-ggplot(ll_long, aes(x = tidytext::reorder_within(fit_config, -ll, variable), y = ll, colour = as.factor(n_windows))) +
-  facet_grid(~ variable, scales = "free_x") +
-  geom_point() +
-  tidytext::scale_x_reordered() +
-  labs(x = "Model", y = "Average log-likelihood (higher is better)", colour = "Windows") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/log-likelihood-1.png)<!-- -->
-
-### AIC
-
-Log-likelihood does not take the complexity of the model into account.
-We can account for this using a metric like the Akaike Information
-Criterion (AIC), which evaluates the goodness of fit of a model while
-penalising for the number of parameters. Once again, since subset sizes
-are slightly different, we average AIC.
-
-``` r
-number_of_parameters <- preds[, .(k = uniqueN(window)), by = .(n_windows, window_type, subset, sub_label)]
-number_of_parameters <- number_of_parameters[, .(k = sum(k)), by = .(n_windows, window_type, subset)]
-number_of_parameters[window_type == "lm", k := k * 3] # Intercept, slope, error variance
-preds <- preds[number_of_parameters, on = .(n_windows, window_type, subset)]
-
-aic_pred <- preds[, .(n = .N,
-                      aic_tau = aic(k[1], correct, p_recall_tau, average = TRUE),
-                      aic_d = aic(k[1], correct, p_recall_d, average = TRUE),
-                      aic_h = aic(k[1], correct, p_recall_h, average = TRUE)), by = .(subset, n_windows, window_type, k)]
-
-aic_pred[, fit_config := paste(subset, n_windows, window_type)]
-
-aic_long <- melt(aic_pred, measure.vars = patterns("aic_*"), value.name = "aic")
-aic_long[, variable := gsub("aic_", "", variable, fixed = TRUE)]
-
-ggplot(aic_long, aes(x = tidytext::reorder_within(fit_config, aic, variable), y = aic, colour = k)) +
-  facet_grid(~ variable, scales = "free_x") +
-  geom_point() +
-  tidytext::scale_x_reordered() +
-  labs(x = "Model", y = "Normalised AIC (lower is better)", colour = "Parameters") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/aic-1.png)<!-- -->
-
-There are some differences in normalised AIC between parameters. To get
-a general sense of the best model, average AIC across parameters:
-
-``` r
-aic_pred[, aic_mean := (aic_tau + aic_d + aic_h) / 3]
-
-ggplot(aic_pred, aes(x = reorder(fit_config, aic_mean), y = aic_mean, colour = k)) +
-  geom_point() +
-  labs(x = "Model", y = "Normalised AIC (lower is better)", colour = "Parameters") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-25-1.png)<!-- -->
-
-### Akaike weights
-
-To determine the relative support for each model, we calculate Akaike
-weights ([Wagenmakers & Farrell,
-2004](https://doi.org/10.3758/BF03206482)) based on the AIC values.
-These sum to 1 and show the relative likelihood of each model given the
-data.
-
-``` r
-aic_pred[, akaike_weights_tau := akaike_weights(aic_tau)]
-aic_pred[, akaike_weights_d := akaike_weights(aic_d)]
-aic_pred[, akaike_weights_h := akaike_weights(aic_h)]
-
-aw_long <- melt(aic_pred, measure.vars = patterns("akaike_weights_*"), value.name = "akaike_weights")
-aw_long[, variable := gsub("akaike_weights_", "", variable, fixed = TRUE)]
-
-ggplot(aw_long, aes(x = tidytext::reorder_within(fit_config, -akaike_weights, variable), y = akaike_weights, colour = k)) +
-  facet_grid(~ variable, scales = "free_x") +
-  geom_point() +
-  tidytext::scale_x_reordered() +
-  labs(x = "Model", y = "Relative likelihood", colour = "Parameters") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/akaike-weights-1.png)<!-- -->
-
-Best model regardless of parameter:
-
-``` r
-ggplot(aw_long, aes(x = reorder(fit_config, -akaike_weights), y = akaike_weights, colour = variable)) +
-  geom_point() +
-  tidytext::scale_x_reordered() +
-  labs(x = "Model", y = "Relative likelihood", colour = "Model\nParameter") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-26-1.png)<!-- -->
-
-### ROC
-
-To assess the overall ability of each model variant to distinguish
-between correct and incorrect responses, we can calculate the area under
-the receiver operating characteristic (ROC) curve (AUC). Whereas
-log-likelihood-based metrics require a specific threshold to determine
-correct vs. incorrect responses (i.e., p(recall) = 0.5), the ROC curve
-is threshold-independent.
-
-``` r
-library(pROC)
-
-roc_tau <- preds[, .( roc = list(roc(correct, p_recall_tau, quiet = TRUE))), by = .(subset, n_windows, window_type)]
-roc_d <- preds[, .( roc = list(roc(correct, p_recall_d, quiet = TRUE))), by = .(subset, n_windows, window_type)]
-roc_h <- preds[, .( roc = list(roc(correct, p_recall_h, quiet = TRUE))), by = .(subset, n_windows, window_type)]
-
-ggroc(roc_tau$roc) +
-  annotate("segment", x = 1, xend = 0, y = 0, yend = 1, linetype="dashed") +
-  scale_colour_discrete(name = "Model", labels = roc_tau[, paste0(subset, " (", n_windows, " windows, ", window_type, ")")]) +
-  labs(x = "False positive rate", y = "True positive rate", title = "ROC curve for tau") +
-  theme_bw(base_size = 14)
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-27-1.png)<!-- -->
-
-``` r
-ggroc(roc_d$roc) +
-  annotate("segment", x = 1, xend = 0, y = 0, yend = 1, linetype="dashed") +
-  scale_colour_discrete(name = "Model", labels = roc_tau[, paste0(subset, " (", n_windows, " windows, ", window_type, ")")]) +
-  labs(x = "False positive rate", y = "True positive rate", title = "ROC curve for d") +
-  theme_bw(base_size = 14)
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-27-2.png)<!-- -->
-
-``` r
-ggroc(roc_h$roc) +
-  annotate("segment", x = 1, xend = 0, y = 0, yend = 1, linetype="dashed") +
-  scale_colour_discrete(name = "Model", labels = roc_tau[, paste0(subset, " (", n_windows, " windows, ", window_type, ")")]) +
-  labs(x = "False positive rate", y = "True positive rate", title = "ROC curve for h") +
-  theme_bw(base_size = 14)
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-27-3.png)<!-- -->
-
-The area under the curve (AUC) provides a single value summarising the
-ROC curve.
-
-``` r
-roc_tau[, auc := sapply(roc, function (x) x$auc)]
-roc_d[, auc := sapply(roc, function (x) x$auc)]
-roc_h[, auc := sapply(roc, function (x) x$auc)]
-
-ggplot(roc_tau, aes(x = reorder(paste(subset, n_windows, window_type), -auc), y = auc)) +
-  geom_point() +
-  labs(x = "Model", y = "AUC", title = "AUC for tau") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-28-1.png)<!-- -->
-
-``` r
-ggplot(roc_d, aes(x = reorder(paste(subset, n_windows, window_type), -auc), y = auc)) +
-  geom_point() +
-  labs(x = "Model", y = "AUC", title = "AUC for d") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-28-2.png)<!-- -->
-
-``` r
-ggplot(roc_h, aes(x = reorder(paste(subset, n_windows, window_type), -auc), y = auc)) +
-  geom_point() +
-  labs(x = "Model", y = "AUC", title = "AUC for h") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-28-3.png)<!-- -->
-
-These AUC values show that the models have a reasonably good ability to
-distinguish between correct and incorrect responses, with the best model
-configurations achieving an ROC AUC of around 0.75 and the worst
-configuration only achieving chance level (0.50).
-
-### Bin-wise log-likelihood
-
-Instead of calculating log-likelihood across bins, we can also calculate
-it separately within each bin of the 20-bin division. That way, we can
-(i) compare model performance at specific time scales, and (ii) correct
-for overrepresentation of certain time scales in the data.
-
-``` r
-windows_20 <- window_range[n_windows == 20]
-
-ll_by_window <- map(1:20, function (i) {
-  
-  window_start <- windows_20[window == i, start]
-  window_end <- windows_20[window == i, end]
-
-  # Only include sequences within the window bounds: <start, end]
-  # But: if this is the first window, do include the lower bound
-  if (i == 1) {
-    preds_window <- preds[time_between >= window_start & time_between <= window_end, ]
-  } else {
-    preds_window <- preds[time_between > window_start & time_between <= window_end, ]
-  }
-    
-  ll_window <- preds_window[, .(window = i,
-                                ll_tau = log_likelihood(correct, p_recall_tau, average = TRUE),
-                                ll_d = log_likelihood(correct, p_recall_d, average = TRUE),
-                                ll_h = log_likelihood(correct, p_recall_h, average = TRUE)), by = .(subset, n_windows, window_type)]
-  
-  ll_window[, fit_config := paste(subset, n_windows, window_type)]
-
-  ll_window_long <- melt(ll_window, measure.vars = patterns("ll_*"), value.name = "ll")
-  ll_window_long[, variable := gsub("ll_", "", variable, fixed = TRUE)]
-
-
-  return (ll_window_long)
-}) |>
-  rbindlist()
-
-ll_by_window <- ll_by_window[number_of_parameters, on = .(n_windows, window_type, subset)]
-```
-
-The ll by window is already normalised, i.e., divided by the number of
-observations in that window. That means that we can simply take the mean
-across windows to get an overall normalised ll:
-
-``` r
-ll_across_windows <- ll_by_window[, .(nll = mean(ll)), by = .(fit_config, subset, n_windows, window_type, variable, k)]
-
-n_obs <- preds[, .N, by = .(subset, n_windows, window_type)]
-ll_across_windows <- ll_across_windows[n_obs, on = .(subset, n_windows, window_type)]
-
-aic_across_windows <- ll_across_windows[, .(aic = -2 * nll + (2 * k) / N), by = .(fit_config, k, subset, n_windows, window_type, variable)]
-
-ggplot(aic_across_windows, aes(y = tidytext::reorder_within(fit_config, aic, variable), x = aic, colour = k)) +
-  facet_wrap(~ variable, scales = "free") +
-  geom_point() +
-  tidytext::scale_y_reordered() +
-  labs(y = "Model", x = "Normalised AIC (lower is better)", colour = "Parameters")
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-30-1.png)<!-- -->
-
-``` r
-# Calculate Akaike weights from AIC per variable
-aic_across_windows[, akaike_weight := akaike_weights(aic), by = variable]
-
-ggplot(aic_across_windows, aes(x = tidytext::reorder_within(fit_config, -akaike_weight, variable), y = akaike_weight, colour = as.factor(n_windows))) +
-  facet_grid(~ variable, scales = "free_x") +
-  geom_point() +
-  tidytext::scale_x_reordered() +
-  scale_colour_viridis_d(option = "D") +
-  labs(x = "Model", y = "Relative likelihood", colour = "Parameters") +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
-```
-
-![](03_fit_models_files/figure-gfm/unnamed-chunk-31-1.png)<!-- -->
+![](../output/practice_by_windows.png)
 
 # Visualisations
 
 Model fits (Figure 1):
 
 ``` r
+plot_theme <- theme(
+  plot.background = element_rect(fill = "white", colour = NA),
+  plot.tag.position = c(0, .976),
+  plot.tag = element_text(face = "bold", hjust = 0),
+  plot.title = element_text(face = "bold", hjust = 0)
+)
+
 p_combined <-
   (
-    p_histogram + ggtitle("Interval distribution") |
-    p_tau_short + ggtitle("Threshold optimised for 0–10 min")
+    (p_histogram + ggtitle("Interval distribution") + plot_theme) |
+    (p_tau_short + ggtitle("Threshold optimised for 0–10 min") + plot_theme)
   ) /
   (
-    p_tau_24h + ggtitle("Threshold optimised for 24h") |
-    p_tau_windows[[4]] + ggtitle("Interval-dependent threshold")
+    (p_tau_24h + ggtitle("Threshold optimised for 24h") + plot_theme) |
+    (p_tau_windows[[5]] + ggtitle("Interval-dependent threshold") + plot_theme)
   ) /
   (
-    p_d_24h + ggtitle("Decay optimised for 24h") |
-    p_d_windows[[4]] + ggtitle("Interval-dependent decay")
+    (p_d_24h + ggtitle("Decay optimised for 24h") + plot_theme) |
+    (p_d_windows[[5]] + ggtitle("Interval-dependent decay") + plot_theme)
   ) /
   (
-    p_h_24h + ggtitle("Scaling factor optimised for 24h") |
-    p_h_windows[[4]] + ggtitle("Interval-dependent scaling factor")
+    (p_h_24h + ggtitle("Scaling factor optimised for 24h") + plot_theme) |
+    (p_h_windows[[5]] + ggtitle("Interval-dependent scaling factor") + plot_theme)
   ) +
-  plot_annotation(tag_levels = "a") &  # automatically "a"..."h"
-  theme(
-    plot.background = element_rect(fill = "white", colour = NA),
-    plot.tag.position = c(0, .976),       # top-left corner of each panel
-    plot.tag = element_text(face = "bold", hjust = 0),
-    plot.title = element_text(face = "bold", hjust = 0)
-  )
+  plot_annotation(tag_levels = "a")
 
-
-ggsave(file.path("..", "output", "model_fitting_results.png"), width = 10, height = 15)
+ggsave(file.path("..", "output", "model_fitting_results_revision.png"), width = 10, height = 15)
 ```
 
-![](../output/model_fitting_results.png)
+![](../output/model_fitting_results_revision.png)
 
 Parameters as a function of the between-session interval (Figure 2):
 
 ``` r
 p_combined_time <-
   (
-    p_tau_time + ggtitle("Interval-dependent threshold") |
-    p_d_time   + ggtitle("Interval-dependent decay") |
-    p_h_time   + ggtitle("Interval-dependent h")
+    p_tau_time + ggtitle("Interval-dependent threshold") + plot_theme |
+    p_d_time   + ggtitle("Interval-dependent decay") + plot_theme |
+    p_h_time   + ggtitle("Interval-dependent h") + plot_theme
   ) +
-  plot_annotation(tag_levels = "a") &
-  theme(
-    plot.background = element_rect(fill = "white", colour = NA),
-    plot.tag.position = c(0, .976),
-    plot.tag = element_text(face = "bold", hjust = 0),
-    plot.title = element_text(face = "bold", hjust = 0)
-  )
+  plot_annotation(tag_levels = "a")
 
-ggsave(file.path("..", "output", "params_time.png"), width = 12, height = 4)
+ggsave(file.path("..", "output", "params_time_revision.png"), width = 12, height = 4)
 ```
 
     ## Warning in scale_x_log10(breaks = scales::trans_breaks("log10", function(x) 10^x), : log-10 transformation introduced infinite values.
@@ -1773,7 +1525,28 @@ ggsave(file.path("..", "output", "params_time.png"), width = 12, height = 4)
 
     ## Warning in scale_y_log10(): log-10 transformation introduced infinite values.
 
-![](../output/params_time.png)
+![](../output/params_time_revision.png)
+
+Log-likelihood comparison (Figure 3):
+
+``` r
+p_combined_ll <- p_ll_regular + ggtitle("Interval-dependent fits") + plot_theme + p_ll_extrap + ggtitle("Localised fits") + plot_theme +
+  plot_layout(widths = c(3, 1), guides = "collect") +
+  plot_annotation(tag_levels = "a")
+
+p_combined_ll <- patchwork:::`&.gg`(p_combined_ll, theme(legend.position = "bottom"))
+
+ggsave(
+  plot = p_combined_ll,
+  filename = here("output", "cv_log_likelihood.png"),
+  width = 12, height = 5
+)
+```
+
+    ## Warning: annotation$theme is not a valid theme.
+    ## Please use `theme()` to construct themes.
+
+![](../output/cv_log_likelihood.png)
 
 # Session info
 
@@ -1799,24 +1572,34 @@ sessionInfo()
     ## [1] stats     graphics  grDevices utils     datasets  methods   base     
     ## 
     ## other attached packages:
-    ##  [1] pROC_1.18.5       tidyr_1.3.1       ggtext_0.1.2      patchwork_1.3.0  
-    ##  [5] ggplot2_3.5.1     here_1.0.1        furrr_0.3.1       future_1.34.0    
-    ##  [9] purrr_1.0.4       data.table_1.17.0
+    ##  [1] tidyr_1.3.1       ggtext_0.1.2      patchwork_1.3.0   caret_7.0-1      
+    ##  [5] lattice_0.22-6    ggplot2_4.0.2     here_1.0.1        furrr_0.3.1      
+    ##  [9] future_1.34.0     purrr_1.0.4       data.table_1.17.0
     ## 
     ## loaded via a namespace (and not attached):
-    ##  [1] janeaustenr_1.0.0 sass_0.4.9        generics_0.1.3    xml2_1.3.8       
-    ##  [5] stringi_1.8.7     lattice_0.22-6    listenv_0.9.1     digest_0.6.37    
-    ##  [9] magrittr_2.0.3    evaluate_1.0.3    grid_4.4.3        fastmap_1.2.0    
-    ## [13] plyr_1.8.9        Matrix_1.7-3      rprojroot_2.0.4   jsonlite_2.0.0   
-    ## [17] tidytext_0.4.2    mgcv_1.9-1        viridisLite_0.4.2 scales_1.3.0     
-    ## [21] codetools_0.2-20  textshaping_1.0.0 jquerylib_0.1.4   cli_3.6.4        
-    ## [25] rlang_1.1.5       crayon_1.5.3      tokenizers_0.3.0  parallelly_1.43.0
-    ## [29] splines_4.4.3     munsell_0.5.1     withr_3.0.2       cachem_1.1.0     
-    ## [33] yaml_2.3.10       tools_4.4.3       parallel_4.4.3    dplyr_1.1.4      
-    ## [37] colorspace_2.1-1  globals_0.16.3    vctrs_0.6.5       R6_2.6.1         
-    ## [41] lifecycle_1.0.4   ragg_1.3.3        pkgconfig_2.0.3   pillar_1.10.1    
-    ## [45] bslib_0.9.0       gtable_0.3.6      glue_1.8.0        Rcpp_1.0.14      
-    ## [49] systemfonts_1.2.1 xfun_0.51         tibble_3.2.1      tidyselect_1.2.1 
-    ## [53] rstudioapi_0.17.1 knitr_1.50        farver_2.1.2      SnowballC_0.7.1  
-    ## [57] nlme_3.1-168      htmltools_0.5.8.1 labeling_0.4.3    rmarkdown_2.29   
-    ## [61] compiler_4.4.3    gridtext_0.1.5
+    ##  [1] tidyselect_1.2.1     timeDate_4041.110    dplyr_1.2.0         
+    ##  [4] farver_2.1.2         S7_0.2.1             fastmap_1.2.0       
+    ##  [7] pROC_1.18.5          digest_0.6.37        rpart_4.1.24        
+    ## [10] timechange_0.3.0     lifecycle_1.0.5      survival_3.8-3      
+    ## [13] magrittr_2.0.3       compiler_4.4.3       rlang_1.1.7         
+    ## [16] sass_0.4.9           tools_4.4.3          yaml_2.3.10         
+    ## [19] knitr_1.50           labeling_0.4.3       plyr_1.8.9          
+    ## [22] xml2_1.3.8           RColorBrewer_1.1-3   withr_3.0.2         
+    ## [25] nnet_7.3-20          grid_4.4.3           stats4_4.4.3        
+    ## [28] globals_0.16.3       scales_1.4.0         iterators_1.0.14    
+    ## [31] MASS_7.3-65          cli_3.6.5            rmarkdown_2.29      
+    ## [34] ragg_1.3.3           generics_0.1.3       rstudioapi_0.17.1   
+    ## [37] future.apply_1.11.3  reshape2_1.4.4       cachem_1.1.0        
+    ## [40] stringr_1.5.1        splines_4.4.3        parallel_4.4.3      
+    ## [43] vctrs_0.7.2          hardhat_1.4.1        Matrix_1.7-3        
+    ## [46] jsonlite_2.0.0       listenv_0.9.1        systemfonts_1.3.2   
+    ## [49] foreach_1.5.2        gower_1.0.2          jquerylib_0.1.4     
+    ## [52] recipes_1.2.1        glue_1.8.0           parallelly_1.43.0   
+    ## [55] codetools_0.2-20     lubridate_1.9.4      stringi_1.8.7       
+    ## [58] gtable_0.3.6         tibble_3.2.1         pillar_1.10.1       
+    ## [61] htmltools_0.5.8.1    ipred_0.9-15         lava_1.8.1          
+    ## [64] R6_2.6.1             textshaping_1.0.0    rprojroot_2.0.4     
+    ## [67] evaluate_1.0.3       gridtext_0.1.5       bslib_0.9.0         
+    ## [70] class_7.3-23         Rcpp_1.1.1           nlme_3.1-168        
+    ## [73] prodlim_2024.06.25   mgcv_1.9-1           xfun_0.51           
+    ## [76] pkgconfig_2.0.3      ModelMetrics_1.2.2.2
