@@ -1184,6 +1184,7 @@ p_tau_windows <- map(n_windows, function (n_w) {
 ```
 
 ![](03_fit_models_files/figure-gfm/unnamed-chunk-17-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-17-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-17-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-17-4.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-17-5.png)<!-- -->
+
 Decay fitted to various window splits:
 
 ``` r
@@ -1202,6 +1203,7 @@ p_d_windows <- map(n_windows, function (n_w) {
 ```
 
 ![](03_fit_models_files/figure-gfm/unnamed-chunk-18-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-18-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-18-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-18-4.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-18-5.png)<!-- -->
+
 Scaling factor fitted to various window splits:
 
 ``` r
@@ -1220,7 +1222,8 @@ p_h_windows <- map(n_windows, function (n_w) {
 ```
 
 ![](03_fit_models_files/figure-gfm/unnamed-chunk-19-1.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-19-2.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-19-3.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-19-4.png)<!-- -->![](03_fit_models_files/figure-gfm/unnamed-chunk-19-5.png)<!-- -->
-\#### Short intervals
+
+#### Short intervals
 
 Tau fitted to short intervals:
 

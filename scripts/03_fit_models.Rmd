@@ -979,6 +979,7 @@ p_tau_windows <- map(n_windows, function (n_w) {
   return (p)
 })
 ```
+
 Decay fitted to various window splits:
 ```{r}
 pred_d <- copy(preds_cv)
@@ -994,6 +995,7 @@ p_d_windows <- map(n_windows, function (n_w) {
   return (p)
 })
 ```
+
 Scaling factor fitted to various window splits:
 ```{r}
 pred_h <- copy(preds_cv)
@@ -1009,6 +1011,7 @@ p_h_windows <- map(n_windows, function (n_w) {
   return (p)
 })
 ```
+
 #### Short intervals
 
 Tau fitted to short intervals:
@@ -1278,6 +1281,7 @@ p_combined_time <-
 
 ggsave(file.path("..", "output", "params_time_revision.png"), width = 12, height = 4)
 ```
+
 ![](../output/params_time_revision.png)
 
 Log-likelihood comparison (Figure 3):
