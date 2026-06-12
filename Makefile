@@ -12,9 +12,11 @@ data/cogpsych_data_formatted.csv: data/cogpsych_data_anon_2017.rda data/cogpsych
 # Walkthrough
 output/02_walkthrough.nb.html output/02_walkthrough.md: scripts/02_walkthrough.Rmd scripts/00_helper_funs.R data/cogpsych_data_formatted.csv 
 	Rscript -e "rmarkdown::render('scripts/02_walkthrough.Rmd', output_format = 'all')"
+	rm -rf output/02_walkthrough_files/*
 	mv scripts/02_walkthrough.nb.html scripts/02_walkthrough.html scripts/02_walkthrough.md scripts/02_walkthrough_files output
 
 # Fit models
 output/03_fit_models.nb.html output/03_fit_models.md: scripts/03_fit_models.Rmd scripts/00_helper_funs.R data/cogpsych_data_formatted.csv
 	Rscript -e "rmarkdown::render('scripts/03_fit_models.Rmd', output_format = 'all')"
+	rm -f output/03_fit_models_files/*
 	mv scripts/03_fit_models.nb.html scripts/03_fit_models.html scripts/03_fit_models.md scripts/03_fit_models_files output
